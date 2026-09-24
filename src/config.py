@@ -19,6 +19,7 @@ EXTRACTOR_VERSION = 2           # 2: tables, figures, cross-references
 CAPTION_MAX_GAP = 40            # Points between a table and its caption
 FIGURE_BODY_TEXT_CHARS = 80     # Text blocks this long are body paragraphs, which bound a figure's top
 TABLE_OVERLAP_FRACTION = 0.7    # Text blocks this much inside a table are cells, not passages
+TABLE_MIN_RULE = 10             # Points; shorter strokes (ticks, underlines) aren't table rules
 
 # Running headers/footers: text in the top/bottom margin repeated on most pages
 MARGIN_FRACTION = 0.08          # Fraction of page height treated as header/footer band

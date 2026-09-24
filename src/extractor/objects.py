@@ -68,10 +68,54 @@ def _clean_cell(cell: Optional[str]) -> str:
     return " ".join((cell or "").split())
 
 
+def _ruled_region(page: pymupdf.Page) -> Optional[pymupdf.Rect]:
+    """
+    The area covered by horizontal and vertical rules, or None when the page can't hold a ruled
+    table. PyMuPDF's line-based table finder needs both kinds of rule to form cells, so pages
+    without them (most pages) can skip it: it's by far the slowest step of indexing.
+    """
+    height = page.rect.height
+    band = height * config.MARGIN_FRACTION
+    horizontal = vertical = 0
+    # Bounds are tracked by hand: Rect's "|" skips zero-area rects, and a rule is exactly that
+    x0 = y0 = float("inf")
+    x1 = y1 = float("-inf")
+    for path in page.get_cdrawings():
+        for item in path["items"]:
+            if item[0] == "l":
+                (ax, ay), (bx, by) = item[1], item[2]
+                rect = pymupdf.Rect(min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
+            elif item[0] == "re":
+                rect = pymupdf.Rect(item[1])
+            else:
+                continue  # Curves and quads don't form table grids
+            if rect.y1 <= band or rect.y0 >= height - band:
+                continue  # Header/footer rules
+            wide, tall = rect.width >= config.TABLE_MIN_RULE, rect.height >= config.TABLE_MIN_RULE
+            if not (wide or tall):
+                continue
+            if item[0] == "re":  # A rectangle contributes both edges in each direction it spans
+                horizontal += 2 if wide else 0
+                vertical += 2 if tall else 0
+            elif rect.height < 1:
+                horizontal += 1
+            elif rect.width < 1:
+                vertical += 1
+            else:
+                continue  # Diagonal stroke: part of a drawing, not a grid
+            x0, y0 = min(x0, rect.x0), min(y0, rect.y0)
+            x1, y1 = max(x1, rect.x1), max(y1, rect.y1)
+    return pymupdf.Rect(x0, y0, x1, y1) if horizontal >= 2 and vertical >= 2 else None
+
+
 def find_tables(page: pymupdf.Page, blocks: List[tuple]) -> List[PageTable]:
     """Ruled tables on the page, each paired with its caption block when one sits just above or below."""
+    region = _ruled_region(page)
+    if region is None:
+        return []
     try:
-        found = page.find_tables().tables
+        # Clipping to the ruled area keeps the finder from reading every character on the page
+        found = page.find_tables(clip=region + (-2, -2, 2, 2)).tables
     except Exception:
         return []  # Table detection is best-effort; a malformed page shouldn't stop ingestion
 
