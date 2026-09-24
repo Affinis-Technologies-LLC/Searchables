@@ -1,4 +1,5 @@
 """The Library tab: add, re-index, rename and delete documents."""
+import sys
 from typing import List
 
 import pandas as pd
@@ -68,10 +69,12 @@ def _add(library: Library, extractor: PDFExtractor, uploads) -> None:
 
 def render_library_tab(library: Library, extractor: PDFExtractor, documents: List[Document]) -> None:
     if not extractor.use_ocr:
-        st.warning(
-            "Tesseract OCR was not found, so scanned pages can't be read. "
-            "Install it with `brew install tesseract` and restart the app."
-        )
+        if sys.platform == "win32":
+            how = ("Install Tesseract (the UB Mannheim build), then re-run `deploy\\windows\\install-service.ps1` "
+                   "or set `TESSDATA_PREFIX` to its `tessdata` folder, and restart the app.")
+        else:
+            how = "Install it with `brew install tesseract` (macOS) or `apt install tesseract-ocr` (Linux) and restart the app."
+        st.warning(f"Tesseract OCR was not found, so scanned pages can't be read. {how}")
 
     outdated = library.outdated_documents()
     if outdated:

@@ -4,6 +4,11 @@ pdf_query_engine/
 ├── app.py                      # Main entrypoint: page setup, sidebar, Search tab, wiring
 ├── requirements.txt
 ├── data/                       # Library: stored PDFs + SQLite index & collections (git-ignored)
+├── deploy/
+│   └── windows/
+│       ├── install-service.ps1     # Installs/updates the Windows service (WinSW), venv, data folder
+│       ├── uninstall-service.ps1   # Removes the service; keeps the library unless -RemoveData
+│       └── README.md               # Windows service setup, security and troubleshooting
 ├── src/
 │   ├── __init__.py
 │   ├── config.py               # Constants, thresholds, and paths
