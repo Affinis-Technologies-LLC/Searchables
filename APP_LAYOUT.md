@@ -24,14 +24,19 @@ pdf_query_engine/
 │   ├── research/
 │   │   ├── __init__.py
 │   │   ├── collections.py      # Collections of pins (self-contained copies of passages/tables)
-│   │   └── export.py           # Collection → Markdown / Word with citations
+│   │   ├── compare.py          # Edition comparison: clause pairing, word diffs, provision changes
+│   │   ├── export.py           # Collection → Markdown / Word with citations
+│   │   └── glossary.py         # Defined terms from "Terms and definitions" clauses
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── state.py            # Session state & navigation callbacks
 │   │   ├── viewer.py           # Page viewer: page image, text, tables & figures, references
 │   │   ├── pins.py             # Pin buttons
 │   │   ├── tables.py           # Table → DataFrame / HTML / pin payload
+│   │   ├── terms.py            # Cached glossaries and comparisons
 │   │   ├── collections_tab.py  # Collections tab
+│   │   ├── compare_tab.py      # Compare tab
+│   │   ├── glossary_tab.py     # Glossary tab
 │   │   └── library_tab.py      # Library tab
 │   ├── viewer/
 │   │   ├── __init__.py

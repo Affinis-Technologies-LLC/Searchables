@@ -30,12 +30,15 @@ def render_glossary(library: Library, documents: List[Document]) -> None:
 
     list_col, viewer_col = st.columns([2, 3], gap="medium")
     with list_col:
+        # Document sits beside the term: the same term defined in two editions must be told apart at a glance
         frame = pd.DataFrame([
-            {"Term": t.term + (f" ({'; '.join(t.synonyms)})" if t.synonyms else ""), "Definition": t.definition,
-             "Document": titles[t.doc_id], "Clause": t.clause_num, "Page": t.page_label}
+            {"Term": t.term + (f" ({'; '.join(t.synonyms)})" if t.synonyms else ""), "Document": titles[t.doc_id],
+             "Clause": t.clause_num, "Definition": t.definition, "Page": t.page_label}
             for t in shown
         ])
-        event = st.dataframe(frame, hide_index=True, width="stretch", height=config.RESULTS_PANE_HEIGHT,
+        row_height, header_height = 35, 38
+        event = st.dataframe(frame, hide_index=True, width="stretch",
+                             height=min(config.RESULTS_PANE_HEIGHT, header_height + row_height * max(len(shown), 1)),
                              on_select="rerun", selection_mode="single-row", key="glossary_table")
         rows = event.selection.rows if event and event.selection else []
         if rows and rows[0] < len(shown):
