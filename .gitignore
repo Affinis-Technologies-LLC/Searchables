@@ -167,3 +167,8 @@ cython_debug/
 data/
 /.idea
 .idea/Searchables.iml
+
+# Machine- and user-specific tool config (not for a public repo)
+.mcp.json
+.junie/
+.idea/material_theme_project_new.xml
