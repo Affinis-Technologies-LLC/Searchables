@@ -1,18 +1,23 @@
 """Persistent document library: PDFs on disk, blocks and a full-text index in SQLite."""
 import hashlib
+import html
 import math
+
+import numpy as np
 from collections import Counter
 import json
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src import config
 from src.extractor.identifiers import family_of, identifier_key, parent_key, summarize_families
 from src.extractor.objects import parse_caption, standard_pattern
-from src.extractor.pdf import PDFExtractor, ProgressCallback
+from src.extractor.pdf import PDFExtractor
+from src.research.assess import assess
+from src.search import semantic
 from src.extractor.provisions import NOTE, PERMISSION, RECOMMENDATION, REQUIREMENT, classify_provision
 from src.models import (CrossRef, Document, ExtractedDocument, IdentifierFamily, IdentifierHit, RelatedIdentifier,
                         RelatedIdentifiers, RelatedPassage, ResolvedRef, SearchResult, TableData, Term, TextBlock)
@@ -23,6 +28,19 @@ from src.utils.formatting import marked_to_html
 _HIT_START, _HIT_END = "\x02", "\x03"
 _MARKED_SPAN = re.compile(f"{_HIT_START}(.*?){_HIT_END}", re.DOTALL)
 _SNIPPET_TOKENS = 40  # Tables index every cell; results show this many tokens around the hits
+
+# Exact-search syntax ("phrase", OR, NOT, -word, prefix*) means the user wants those exact words
+_EXACT_SYNTAX = re.compile(r'"|\*|\bOR\b|\bAND\b|\bNOT\b|(?:^|\s)-\w')
+
+
+def uses_meaning(query_text: str) -> bool:
+    """Whether a search also looks for passages by meaning (not when exact-search syntax is used)."""
+    return not _EXACT_SYNTAX.search(query_text)
+
+
+# Indexing progress: (stage, done, total), e.g. ("Reading pages", 12, 80)
+StageCallback = Callable[[str, int, int], None]
+READING, UNDERSTANDING = "Reading pages", "Understanding passages"
 
 # Result kinds the sidebar filter offers; headings are grouped with text
 CONTENT_KINDS = {"Text": ("text", "heading"), "Tables": ("table",), "Figures": ("figure",)}
@@ -43,7 +61,8 @@ CREATE TABLE IF NOT EXISTS documents (
     block_count     INTEGER NOT NULL,
     ocr_pages       INTEGER NOT NULL DEFAULT 0,
     added_at        TEXT NOT NULL,
-    extract_version INTEGER NOT NULL DEFAULT 1
+    extract_version INTEGER NOT NULL DEFAULT 1,
+    embedding_model TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS blocks (
     id           INTEGER PRIMARY KEY,
@@ -105,6 +124,13 @@ CREATE TABLE IF NOT EXISTS identifier_families (
     user_enabled    INTEGER,
     PRIMARY KEY (doc_id, family)
 );
+-- Meaning vectors (float32) from the embedding model named in documents.embedding_model
+CREATE TABLE IF NOT EXISTS embeddings (
+    block_id INTEGER PRIMARY KEY REFERENCES blocks(id) ON DELETE CASCADE,
+    doc_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    vector   BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS embeddings_doc ON embeddings(doc_id);
 CREATE TABLE IF NOT EXISTS search_history (
     query       TEXT PRIMARY KEY,
     searched_at TEXT NOT NULL
@@ -113,7 +139,7 @@ CREATE TABLE IF NOT EXISTS search_history (
 
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS won't add them to an existing library
 _ADDED_COLUMNS = {
-    "documents": [("extract_version", "INTEGER NOT NULL DEFAULT 1")],
+    "documents": [("extract_version", "INTEGER NOT NULL DEFAULT 1"), ("embedding_model", "TEXT NOT NULL DEFAULT ''")],
     "blocks": [("label", "TEXT NOT NULL DEFAULT ''"), ("provision", "TEXT NOT NULL DEFAULT ''")],
 }
 
@@ -126,6 +152,10 @@ class Library:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # WAL: readers aren't blocked by the background indexer's writes, and it survives crashes better
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA busy_timeout = 15000")
+        self._vector_cache: Optional[tuple] = None
         self._migrate()
         self.conn.executescript(_SCHEMA)
 
@@ -156,7 +186,7 @@ class Library:
         file_bytes: bytes,
         filename: str,
         extractor: PDFExtractor,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: Optional[StageCallback] = None,
     ) -> Tuple[Document, Optional[ExtractedDocument]]:
         """
         Extracts and indexes a PDF. Returns (document, extraction details), with details None
@@ -168,6 +198,7 @@ class Library:
             return existing, None
 
         extracted = self._extract(file_bytes, filename, extractor, on_progress)
+        vectors = self._embed(extracted.blocks, on_progress)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO documents (title, filename, sha256, page_count, block_count, ocr_pages, added_at, "
@@ -175,7 +206,7 @@ class Library:
                 (extracted.title, filename, sha256, extracted.page_count, len(extracted.blocks),
                  len(extracted.ocr_pages), datetime.now().isoformat(timespec="seconds"), config.EXTRACTOR_VERSION),
             )
-            self._store_extraction(cur.lastrowid, extracted)
+            self._store_extraction(cur.lastrowid, extracted, vectors)
 
         # Keep the original PDF for page rendering; written after the commit so a failed index leaves no orphan
         self.pdf_path(sha256).write_bytes(file_bytes)
@@ -185,7 +216,7 @@ class Library:
         self,
         doc_id: int,
         extractor: PDFExtractor,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: Optional[StageCallback] = None,
     ) -> ExtractedDocument:
         """Re-extracts a document from its stored PDF with the current extractor, keeping its title."""
         doc = self.get_document(doc_id)
@@ -196,19 +227,55 @@ class Library:
             raise ValueError(f"The stored PDF for {doc.title} is missing; delete it and add the file again.")
 
         extracted = self._extract(path.read_bytes(), doc.filename, extractor, on_progress)
+        vectors = self._embed(extracted.blocks, on_progress)
         with self.conn:
             self._delete_index(doc_id)
             self.conn.execute(
                 "UPDATE documents SET page_count = ?, block_count = ?, ocr_pages = ?, extract_version = ? WHERE id = ?",
                 (extracted.page_count, len(extracted.blocks), len(extracted.ocr_pages), config.EXTRACTOR_VERSION, doc_id),
             )
-            self._store_extraction(doc_id, extracted)
+            self._store_extraction(doc_id, extracted, vectors)
         return extracted
+
+    def embed_document(self, doc_id: int, on_progress: Optional[StageCallback] = None) -> int:
+        """
+        Adds meaning vectors to an already-indexed document (indexed before meaning search, or with a
+        different model), without re-reading the PDF. Returns the number of passages embedded.
+        """
+        blocks = self.document_blocks(doc_id)
+        vectors = self._embed(blocks, on_progress, raise_errors=True)
+        with self.conn:
+            self.conn.execute("DELETE FROM embeddings WHERE doc_id = ?", (doc_id,))
+            self.conn.executemany(
+                "INSERT INTO embeddings (block_id, doc_id, vector) VALUES (?, ?, ?)",
+                [(b.id, doc_id, v.tobytes()) for b, v in zip(blocks, vectors)],
+            )
+            self.conn.execute("UPDATE documents SET embedding_model = ? WHERE id = ?", (config.EMBEDDING_ID, doc_id))
+        return len(blocks)
+
+    @staticmethod
+    def _embed(blocks: Sequence[TextBlock], on_progress: Optional[StageCallback],
+               raise_errors: bool = False) -> Optional[np.ndarray]:
+        """
+        Meaning vectors for blocks, or None if the model can't be loaded (e.g. first use without an
+        internet connection): the document is then indexed without them and can be completed later.
+        """
+        texts = [semantic.passage_text(b.clause_title, b.text[:config.EMBEDDING_MAX_CHARS]) for b in blocks]
+        try:
+            return semantic.embed_passages(
+                texts, (lambda done, total: on_progress(UNDERSTANDING, done, total)) if on_progress else None
+            )
+        except Exception:
+            if raise_errors:
+                raise
+            return None
 
     @staticmethod
     def _extract(file_bytes: bytes, filename: str, extractor: PDFExtractor,
-                 on_progress: Optional[ProgressCallback]) -> ExtractedDocument:
-        extracted = extractor.extract(file_bytes, filename, on_progress)
+                 on_progress: Optional[StageCallback]) -> ExtractedDocument:
+        extracted = extractor.extract(
+            file_bytes, filename, (lambda done, total: on_progress(READING, done, total)) if on_progress else None
+        )
         if not extracted.blocks:
             raise ValueError(
                 f"No extractable text found in {filename}. "
@@ -216,8 +283,8 @@ class Library:
             )
         return extracted
 
-    def _store_extraction(self, doc_id: int, extracted: ExtractedDocument) -> None:
-        """Writes blocks, index, tables and cross-references. Call inside a transaction."""
+    def _store_extraction(self, doc_id: int, extracted: ExtractedDocument, vectors: Optional[np.ndarray] = None) -> None:
+        """Writes blocks, index, tables, cross-references and meaning vectors. Call inside a transaction."""
         first_id = self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM blocks").fetchone()[0]
         # Extracted ids are positions (0, 1, 2…), so the stored id is first_id + local id
         rows = [
@@ -254,6 +321,13 @@ class Library:
             [(f.doc_id, f.family, f.display, f.distinct_values, f.passages, f.examples, int(f.auto_enabled))
              for f in families],
         )
+        if vectors is not None:
+            self.conn.executemany(
+                "INSERT INTO embeddings (block_id, doc_id, vector) VALUES (?, ?, ?)",
+                [(first_id + b.id, doc_id, v.tobytes()) for b, v in zip(extracted.blocks, vectors)],
+            )
+        self.conn.execute("UPDATE documents SET embedding_model = ? WHERE id = ?",
+                          (config.EMBEDDING_ID if vectors is not None else "", doc_id))
         # Families gone after re-indexing are dropped, unless the user chose a setting for them
         present = [f.family for f in families]
         placeholders = ", ".join("?" * len(present)) or "''"  # NOT IN () is invalid SQL
@@ -271,6 +345,11 @@ class Library:
     def list_documents(self) -> List[Document]:
         rows = self.conn.execute("SELECT * FROM documents ORDER BY title COLLATE NOCASE").fetchall()
         return [Document(**dict(row)) for row in rows]
+
+    def documents_without_meaning(self) -> List[Document]:
+        """Up-to-date documents whose meaning vectors are missing or from a different model."""
+        return [d for d in self.list_documents()
+                if d.extract_version >= config.EXTRACTOR_VERSION and d.embedding_model != config.EMBEDDING_ID]
 
     def outdated_documents(self) -> List[Document]:
         """Documents indexed before the current extractor, missing its newer features."""
@@ -551,8 +630,52 @@ class Library:
             params,
         ).fetchone()[0]
 
-        order = "d.title COLLATE NOCASE, b.seq" if document_order else "score"
-        rows = self.conn.execute(
+        meaning = self._meaning_matches(query_text, doc_ids, kinds, provisions) if uses_meaning(query_text) else []
+        # Keyword rows in relevance order; deeper when they'll be merged with meaning matches
+        depth = max(limit, config.FUSION_DEPTH) if meaning else limit
+        keyword_rows = self._keyword_rows(where, params, "d.title COLLATE NOCASE, b.seq" if document_order and not meaning
+                                          else "score", depth)
+        keyword = {row["id"]: row for row in keyword_rows}
+        if not meaning:
+            return [self._result(row, rank, "keyword") for rank, row in enumerate(keyword_rows, 1)], total
+
+        # Which meaning matches also contain the words (they may rank below the keyword depth)
+        meaning_ids = [block_id for block_id, _ in meaning]
+        also_keyword = {r[0] for r in self.conn.execute(
+            f"SELECT rowid FROM blocks_fts WHERE blocks_fts MATCH ? AND rowid IN ({', '.join('?' * len(meaning_ids))})",
+            [fts_query, *meaning_ids],
+        )}
+        similarity = dict(meaning)
+        missing = [block_id for block_id in meaning_ids if block_id not in keyword]
+        rows = dict(keyword)
+        if missing:
+            for row in self.conn.execute(
+                f"SELECT b.*, d.title AS doc_title FROM blocks b JOIN documents d ON d.id = b.doc_id "
+                f"WHERE b.id IN ({', '.join('?' * len(missing))})", missing,
+            ):
+                rows[row["id"]] = row
+
+        # Reciprocal rank fusion: a passage ranked well by either method rises; by both, higher still
+        fused: Dict[int, float] = {}
+        for rank, block_id in enumerate(keyword, 1):
+            fused[block_id] = fused.get(block_id, 0.0) + 1 / (config.RRF_K + rank)
+        for rank, block_id in enumerate(meaning_ids, 1):
+            fused[block_id] = fused.get(block_id, 0.0) + 1 / (config.RRF_K + rank)
+
+        if document_order:
+            ordered = sorted(fused, key=lambda i: (rows[i]["doc_title"].lower(), rows[i]["seq"]))
+        else:
+            ordered = sorted(fused, key=lambda i: -fused[i])
+        results = []
+        for block_id in ordered[:limit]:
+            in_words = block_id in keyword or block_id in also_keyword
+            match = ("both" if block_id in similarity else "keyword") if in_words else "meaning"
+            results.append(self._result(rows[block_id], len(results) + 1, match, similarity.get(block_id)))
+        meaning_only = sum(1 for block_id in meaning_ids if block_id not in also_keyword)
+        return results, total + meaning_only
+
+    def _keyword_rows(self, where: str, params: list, order: str, limit: int) -> List[sqlite3.Row]:
+        return self.conn.execute(
             f"""
             SELECT b.*, d.title AS doc_title,
                    bm25(blocks_fts) * (CASE WHEN b.kind = 'heading' THEN ? ELSE 1.0 END) AS score,
@@ -568,19 +691,77 @@ class Library:
             [config.HEADING_SCORE_WEIGHT, _HIT_START, _HIT_END, _HIT_START, _HIT_END, *params, limit],
         ).fetchall()
 
-        results = [
-            SearchResult(
-                block=_row_to_block(row),
-                score=-row["score"],  # FTS5 bm25() is negative; flip so higher is better
-                rank=rank,
-                # A table block holds every cell, so show the neighbourhood of the hits instead
-                highlighted_text=marked_to_html(row["snippet" if row["kind"] == "table" else "marked"],
-                                                _HIT_START, _HIT_END),
-                doc_title=row["doc_title"],
+    @staticmethod
+    def _result(row: sqlite3.Row, rank: int, match: str, similarity: Optional[float] = None) -> SearchResult:
+        keys = row.keys()
+        if "marked" in keys:
+            # A table block holds every cell, so show the neighbourhood of the hits instead
+            text = marked_to_html(row["snippet" if row["kind"] == "table" else "marked"], _HIT_START, _HIT_END)
+            score = -row["score"]  # FTS5 bm25() is negative; flip so higher is better
+        else:
+            body = row["text"] if row["kind"] != "table" else row["text"][:config.MEANING_TABLE_PREVIEW_CHARS] + "…"
+            text = html.escape(body)
+            score = similarity or 0.0
+        return SearchResult(block=_row_to_block(row), score=score, rank=rank, highlighted_text=text,
+                            doc_title=row["doc_title"], match=match, similarity=similarity)
+
+    # ---- Meaning ---------------------------------------------------------------------------
+
+    def _vectors(self) -> Optional[tuple]:
+        """
+        All meaning vectors as one matrix with their block ids, kinds, provisions and documents, kept
+        in memory and reloaded only when the stored vectors change.
+        """
+        key = tuple(self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(block_id), 0), COALESCE(MAX(block_id), 0) FROM embeddings"
+        ).fetchone())
+        if key[0] == 0:
+            return None
+        if self._vector_cache is None or self._vector_cache[0] != key:
+            rows = self.conn.execute(
+                "SELECT e.block_id, e.doc_id, b.kind, b.provision, e.vector FROM embeddings e "
+                "JOIN blocks b ON b.id = e.block_id ORDER BY e.block_id"
+            ).fetchall()
+            matrix = np.frombuffer(b"".join(r[4] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+            self._vector_cache = (
+                key,
+                np.array([r[0] for r in rows], dtype=np.int64),
+                np.array([r[1] for r in rows], dtype=np.int64),
+                np.array([r[2] for r in rows]),
+                np.array([r[3] for r in rows]),
+                matrix,
             )
-            for rank, row in enumerate(rows, 1)
-        ]
-        return results, total
+        return self._vector_cache[1:]
+
+    def _meaning_matches(self, query_text: str, doc_ids: Optional[Sequence[int]] = None,
+                         kinds: Optional[Sequence[str]] = None,
+                         provisions: Optional[Sequence[str]] = None) -> List[Tuple[int, float]]:
+        """
+        (block id, similarity) for the passages closest in meaning to the query, best first. Only
+        clearly relevant ones: above an absolute floor, and near the best match's similarity.
+        """
+        vectors = self._vectors()
+        if vectors is None or not semantic.model_files_present():
+            return []
+        ids, docs, block_kinds, block_provisions, matrix = vectors
+        # Bare headings are left to keyword search: their meaning is carried by the passages under
+        # them (embedded with their clause title), and a short heading would crowd out real content
+        mask = block_kinds != "heading"
+        if doc_ids:
+            mask &= np.isin(docs, list(doc_ids))
+        if kinds:
+            mask &= np.isin(block_kinds, list(kinds))
+        if provisions:
+            mask &= np.isin(block_provisions, list(provisions))
+        if not mask.any():
+            return []
+        candidates = np.flatnonzero(mask)
+        similarities = matrix[candidates] @ semantic.embed_query(query_text)
+        order = np.argsort(-similarities)[:config.FUSION_DEPTH]
+        best = float(similarities[order[0]])
+        floor = max(config.MEANING_MIN_SIMILARITY, best - config.MEANING_BAND)
+        return [(int(ids[candidates[i]]), float(similarities[i])) for i in order if similarities[i] >= floor]
+
 
     def hit_pages(self, query_text: str, doc_id: int) -> List[int]:
         """Pages of one document that contain a match, in page order."""
@@ -766,10 +947,63 @@ class Library:
 
         add("references", self._outgoing_links(block))
         add("referenced_by", self._incoming_links(block))
+        # Same topic by meaning (with an assessment) when the passage has a meaning vector; otherwise
+        # fall back to shared wording, at the end, as before
+        same_topic = [r for r in self._same_topic(block, limit) if r.block.id not in seen]
+        if same_topic:
+            seen.update(r.block.id for r in same_topic)
+            groups["same_topic"] = same_topic
         add("identifiers", self._shared_identifiers(block))
         add("terms", self._shared_terms(block, terms))
-        add("similar", self._similar_wording(block))
+        if not same_topic:
+            add("similar", self._similar_wording(block))
         return groups
+
+    def _same_topic(self, block: TextBlock, limit: int) -> List[RelatedPassage]:
+        """
+        Passages about the same thing, by meaning, in any document, each assessed against this one:
+        different values, stronger/weaker requirement, possible conflict, different identifiers.
+        """
+        vectors = self._vectors()
+        if vectors is None or block.kind == "heading" or not semantic.model_files_present():
+            return []
+        ids, _, block_kinds, _, matrix = vectors
+        position = np.searchsorted(ids, block.id)
+        if position >= len(ids) or ids[position] != block.id:
+            return []  # No vector for this passage (indexed before meaning search)
+        similarities = matrix @ matrix[position]
+        similarities[position] = -1.0
+        similarities[block_kinds == "heading"] = -1.0
+        order = [int(i) for i in np.argsort(-similarities)[:limit * 4]
+                 if similarities[i] >= config.SAME_TOPIC_MIN_SIMILARITY]
+        if not order:
+            return []
+        others = [self.get_block(int(ids[i])) for i in order]
+        aligned = semantic.aligned_sentences(block.text, [o.text for o in others])
+        mine = self._identifier_values(block.id)
+        titles = {d.id: d.title for d in self.list_documents()}
+        related = []
+        for i, other, pairs in zip(order, others, aligned):
+            # Overall closeness isn't enough: some sentence must actually correspond
+            if pairs[0][2] < config.SAME_TOPIC_SENTENCE_SIMILARITY:
+                continue
+            findings, shown = assess(pairs, mine, self._identifier_values(other.id),
+                                     corresponding=config.SAME_TOPIC_SENTENCE_SIMILARITY,
+                                     same_content=config.SAME_CONTENT_SIMILARITY)
+            reason = " · ".join(f"{f.label}: {f.detail}" if f.detail else f.label for f in findings) or "Same topic"
+            related.append(RelatedPassage(other, titles.get(other.doc_id, ""), reason, similarity=float(similarities[i]),
+                                          findings=tuple(findings), closest=shown))
+            if len(related) >= limit:
+                break
+        return related
+
+    def _identifier_values(self, block_id: int) -> List[str]:
+        """Switched-on identifiers in a passage, as written."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT o.value FROM identifier_occurrences o JOIN identifier_families f ON f.doc_id = o.doc_id "
+            "AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1 WHERE o.block_id = ?",
+            (block_id,),
+        )]
 
     def _outgoing_links(self, block: TextBlock) -> List[Tuple[int, str]]:
         identifier_families = self.enabled_families(block.doc_id)
@@ -898,6 +1132,7 @@ class Library:
 RELATED_GROUPS = {
     "references": "References",
     "referenced_by": "Referenced by",
+    "same_topic": "Same topic",
     "identifiers": "Shares identifiers",
     "terms": "Defined terms",
     "similar": "Similar wording",

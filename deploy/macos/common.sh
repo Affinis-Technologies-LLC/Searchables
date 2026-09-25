@@ -43,6 +43,12 @@ ensure_environment() {
         "$VENV_PYTHON" -m pip install -r "$APP_DIR/requirements.txt" --quiet
         echo "$current" > "$stamp"
     fi
+
+    # The meaning-search model is downloaded once here, so the app itself never needs the internet
+    if ! (cd "$APP_DIR" && "$VENV_PYTHON" -m src.search.semantic); then
+        warn "The meaning-search model couldn't be downloaded (no internet?). Search still works by words; \
+run this script again when online, then use \"Add meaning search\" in the Library tab."
+    fi
 }
 
 # Prints Tesseract's language-data folder, or nothing. Services don't get your shell's PATH,

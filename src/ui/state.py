@@ -82,16 +82,38 @@ def trail_back() -> None:
         _search_identifier(trail[-1])
 
 
-# ---- Passage trail (Related tab) ----------------------------------------------------------------
+# ---- Passage trail (left pane's Related view) ---------------------------------------------------
 # "passage_trail" entries are (doc_id, page, bbox, block_id, label): the passages visited by
-# following related passages, so Back can retrace the path.
+# following related passages; each breadcrumb step jumps back to one.
 PassageStop = Tuple[int, int, Optional[tuple], int, str]
 
 
-def focus_passage(doc_id: int, page: int, bboxes: dict, picker_key: str) -> None:
-    """The Related tab's passage picker: focus and outline the chosen passage."""
-    block_id = st.session_state.get(picker_key)
-    show_page(doc_id, page, bboxes.get(block_id), focus=block_id)
+# The left pane shows either the tab's own list or the passages related to the explored one
+PANE_RESULTS, PANE_RELATED = "Results", "Related"
+
+
+def set_pane(mode: str) -> None:
+    # Set the switch's own value (allowed in callbacks). Deleting it to make it re-read "pane" isn't
+    # enough here: the browser keeps its previous choice and sends it back on the next click.
+    st.session_state["pane"] = mode
+    st.session_state["pane_input"] = mode
+
+
+def explore_passage(stop: PassageStop) -> None:
+    """A passage's Related button: explore from here, starting a new trail."""
+    st.session_state["passage_trail"] = [stop]
+    doc_id, page, bbox, block_id, _ = stop
+    show_page(doc_id, page, bbox, focus=block_id)
+    set_pane(PANE_RELATED)
+
+
+def jump_to_trail(index: int) -> None:
+    """A breadcrumb step: go back to that passage, dropping the steps after it."""
+    trail = st.session_state.get("passage_trail", [])
+    if 0 <= index < len(trail):
+        del trail[index + 1:]
+        doc_id, page, bbox, block_id, _ = trail[-1]
+        show_page(doc_id, page, bbox, focus=block_id)
 
 
 def follow_passage(target: PassageStop, origin: PassageStop) -> None:
@@ -101,11 +123,3 @@ def follow_passage(target: PassageStop, origin: PassageStop) -> None:
     trail.append(target)
     doc_id, page, bbox, block_id, _ = target
     show_page(doc_id, page, bbox, focus=block_id)
-
-
-def passage_back() -> None:
-    trail = st.session_state.get("passage_trail", [])
-    if len(trail) > 1:
-        trail.pop()
-        doc_id, page, bbox, block_id, _ = trail[-1]
-        show_page(doc_id, page, bbox, focus=block_id)

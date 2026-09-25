@@ -1,4 +1,4 @@
-"""The Library tab: add, re-index, rename and delete documents."""
+"""The Library tab: add, re-index, rename and delete documents; indexing runs in the background."""
 import sys
 from typing import List
 
@@ -7,67 +7,16 @@ import streamlit as st
 
 from src.extractor.pdf import PDFExtractor
 from src.models import Document
+from src.search.indexer import ADD, EMBED, FAILED, REINDEX, Indexer
 from src.search.library import Library
 
 
-def _reindex(library: Library, extractor: PDFExtractor, docs: List[Document]) -> None:
-    """Re-extracts documents from their stored PDFs, then reruns to show the outcome."""
-    messages = []
+def _queue(indexer: Indexer, kind: str, docs: List[Document]) -> None:
     for doc in docs:
-        progress = st.progress(0.0, text=f"Re-indexing {doc.title}…")
-
-        def on_progress(done: int, total: int, name=doc.title, bar=progress) -> None:
-            bar.progress(done / total, text=f"Re-indexing {name}: page {done} of {total}")
-
-        try:
-            extracted = library.reindex_document(doc.id, extractor, on_progress)
-            messages.append(("success", f"Re-indexed **{doc.title}**: {len(extracted.blocks)} passages, "
-                                        f"{len(extracted.tables)} tables, {len(extracted.xrefs)} cross-references"))
-        except ValueError as e:
-            messages.append(("error", str(e)))
-        finally:
-            progress.empty()
-    st.session_state["ingest_messages"] = messages
-    st.rerun()
+        indexer.submit(kind, doc.title, doc_id=doc.id)
 
 
-def _add(library: Library, extractor: PDFExtractor, uploads) -> None:
-    messages = []  # (kind, text): shown after the rerun below
-    for upload in uploads:
-        progress = st.progress(0.0, text=f"Reading {upload.name}…")
-
-        def on_progress(done: int, total: int, name=upload.name, bar=progress) -> None:
-            bar.progress(done / total, text=f"Reading {name}: page {done} of {total}")
-
-        try:
-            doc, extracted = library.add_document(upload.getvalue(), upload.name, extractor, on_progress)
-        except ValueError as e:
-            messages.append(("error", str(e)))
-            continue
-        finally:
-            progress.empty()
-
-        if extracted is None:
-            messages.append(("info", f"**{upload.name}** is already in the library as “{doc.title}”."))
-            continue
-
-        notes = [f"{doc.page_count} pages", f"{doc.block_count} passages"]
-        if extracted.tables:
-            notes.append(f"{len(extracted.tables)} tables")
-        if extracted.ocr_pages:
-            count = len(extracted.ocr_pages)
-            notes.append(f"{count} scanned page{'s' if count != 1 else ''} read with OCR")
-        messages.append(("success", f"Added **{doc.title}**: " + ", ".join(notes)))
-        if extracted.unreadable_pages:
-            pages = ", ".join(map(str, extracted.unreadable_pages[:20]))
-            messages.append(("warning", f"{doc.title}: scanned pages {pages} could not be read and aren't searchable."))
-
-    # Rerun so the header, sidebar and Search tab see the new documents
-    st.session_state["ingest_messages"] = messages
-    st.rerun()
-
-
-def render_library_tab(library: Library, extractor: PDFExtractor, documents: List[Document]) -> None:
+def render_library_tab(library: Library, extractor: PDFExtractor, documents: List[Document], indexer: Indexer) -> None:
     if not extractor.use_ocr:
         if sys.platform == "win32":
             how = ("Install Tesseract (the UB Mannheim build), then re-run `deploy\\windows\\install-service.ps1` "
@@ -76,26 +25,40 @@ def render_library_tab(library: Library, extractor: PDFExtractor, documents: Lis
             how = "Install it with `brew install tesseract` (macOS) or `apt install tesseract-ocr` (Linux) and restart the app."
         st.warning(f"Tesseract OCR was not found, so scanned pages can't be read. {how}")
 
-    outdated = library.outdated_documents()
+    pending = indexer.pending_doc_ids()
+    outdated = [d for d in library.outdated_documents() if d.id not in pending]
     if outdated:
         plural = len(outdated) != 1
         with st.container(border=True):
             st.warning(
                 f"{len(outdated)} document{'s were' if plural else ' was'} indexed by an older version and "
                 f"{'are' if plural else 'is'} missing newer features: tables, figures, cross-references, "
-                "military-style formatting and identifier discovery."
+                "military-style formatting, identifier discovery and meaning search."
             )
-            if st.button(f"Re-index {len(outdated)} document{'s' if plural else ''}", type="primary"):
-                _reindex(library, extractor, outdated)
+            st.button(f"Re-index {len(outdated)} document{'s' if plural else ''}", type="primary",
+                      on_click=_queue, args=(indexer, REINDEX, outdated))
+
+    missing_meaning = [d for d in library.documents_without_meaning() if d.id not in pending]
+    if missing_meaning:
+        plural = len(missing_meaning) != 1
+        with st.container(border=True):
+            st.info(
+                f"{len(missing_meaning)} document{'s' if plural else ''} can't be searched by meaning yet. "
+                "Adding it reads each passage with the local language model: a few minutes for a typical "
+                "standard, longer for very large ones. It runs in the background."
+            )
+            st.button(f"Add meaning search to {len(missing_meaning)} document{'s' if plural else ''}",
+                      on_click=_queue, args=(indexer, EMBED, missing_meaning))
 
     with st.form("add_documents", clear_on_submit=True):
         uploads = st.file_uploader("Add standards (PDF)", type=["pdf"], accept_multiple_files=True)
         submitted = st.form_submit_button("Add to library", type="primary")
     if submitted and uploads:
-        _add(library, extractor, uploads)
+        for upload in uploads:
+            indexer.submit(ADD, upload.name, file_bytes=upload.getvalue())
+        st.rerun()  # Show the queue straight away
 
-    for kind, text in st.session_state.pop("ingest_messages", []):
-        getattr(st, kind)(text)
+    indexing_panel(indexer)
 
     if not documents:
         st.caption("No documents yet.")
@@ -110,6 +73,7 @@ def render_library_tab(library: Library, extractor: PDFExtractor, documents: Lis
                     "Pages": d.page_count,
                     "Passages": d.block_count,
                     "OCR pages": d.ocr_pages,
+                    "Meaning search": "yes" if d.embedding_model else "not yet",
                     "Added": d.added_at.replace("T", " "),
                 }
                 for d in documents
@@ -128,16 +92,42 @@ def render_library_tab(library: Library, extractor: PDFExtractor, documents: Lis
             library.rename_document(target.id, new_title)
             st.rerun()
 
-    if reindex_col.button("Re-index", width="stretch", help="Re-extract from the stored PDF"):
-        _reindex(library, extractor, [target])
+    busy = target.id in pending
+    reindex_col.button("Re-index", width="stretch", disabled=busy, on_click=_queue, args=(indexer, REINDEX, [target]),
+                       help="Already queued" if busy else "Re-extract from the stored PDF (runs in the background)")
 
-    with delete_col.popover("Delete…", width="stretch"):
+    with delete_col.popover("Delete…", width="stretch", disabled=busy):
         st.write(f"Remove **{target.title}** and its index from the library? Pins keep their text and citation.")
         if st.button("Delete permanently", type="primary"):
             library.delete_document(target.id)
             st.rerun()
 
     _identifiers_panel(library, target)
+
+
+@st.fragment(run_every="2s")
+def indexing_panel(indexer: Indexer) -> None:
+    """Live progress of background indexing (the sidebar indicator refreshes the app when a job finishes)."""
+    active, finished = indexer.active(), indexer.finished()
+    if not active and not finished:
+        return
+    with st.container(border=True):
+        st.markdown("**Indexing**")
+        for job in active:
+            label = {ADD: "Adding", REINDEX: "Re-indexing", EMBED: "Adding meaning search to"}[job.kind]
+            if job.status == "running" and job.total:
+                st.progress(job.fraction, text=f"{label} {job.name}: {job.stage.lower()} {job.done:,} of {job.total:,}")
+            elif job.status == "running":
+                st.progress(0.0, text=f"{label} {job.name}: starting (loading the language model the first time)…")
+            else:
+                st.caption(f"Waiting: {label.lower()} {job.name}")
+        for job in reversed(finished[-5:]):
+            if job.status == FAILED:
+                st.error(f"{job.name}: {job.result}")
+            else:
+                st.success(job.result)
+            if job.warning:
+                st.warning(job.warning)
 
 
 def _identifiers_panel(library: Library, doc: Document) -> None:
@@ -185,3 +175,18 @@ def _identifiers_panel(library: Library, doc: Document) -> None:
             library.reset_families(doc.id)
             st.session_state.pop(f"families_{doc.id}", None)
             st.rerun()
+
+
+@st.fragment(run_every="2s")
+def indexing_indicator(indexer: Indexer) -> None:
+    """Sidebar status while indexing runs; refreshes the whole app once when a job finishes."""
+    active, finished = indexer.active(), indexer.finished()
+    if "indexing_seen" not in st.session_state:
+        st.session_state["indexing_seen"] = len(finished)  # Jobs finished before this page opened
+    elif len(finished) > st.session_state["indexing_seen"]:
+        st.session_state["indexing_seen"] = len(finished)
+        st.rerun(scope="app")  # New or changed documents: refresh lists, the sidebar and every tab
+    running = next((j for j in active if j.status == "running"), None)
+    if running:
+        waiting = len(active) - 1
+        st.progress(running.fraction, text=f"Indexing {running.name}" + (f" (+{waiting} waiting)" if waiting else ""))

@@ -44,6 +44,7 @@ class Document:
     ocr_pages: int
     added_at: str
     extract_version: int = 1    # Extractor version that indexed it; older ones lack newer features
+    embedding_model: str = ""   # Model that made its meaning vectors ("" = none yet)
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,9 @@ class RelatedPassage:
     block: TextBlock
     doc_title: str
     reason: str                 # Why it's related: "References Table I", "Shares K3.5, FLD 2041"…
+    similarity: Optional[float] = None       # Same-topic matches: meaning similarity (0–1)
+    findings: Tuple = ()                     # Same-topic matches: research.assess.Finding items
+    closest: Optional[Tuple[str, str]] = None  # Same-topic matches: best (this passage, that passage) sentences
 
 
 @dataclass
@@ -220,6 +224,8 @@ class SearchResult:
     rank: int
     highlighted_text: Optional[str] = None  # HTML-safe text with <mark> around matched terms
     doc_title: str = ""
+    match: str = "keyword"      # "keyword", "meaning" (found only by meaning) or "both"
+    similarity: Optional[float] = None  # Meaning similarity to the query (0–1), when matched by meaning
 
     @property
     def citation(self) -> str:

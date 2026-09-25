@@ -57,6 +57,15 @@ if (-not (Test-Path $Stamp) -or (Get-Content $Stamp -Raw).Trim() -ne $Current) {
     Set-Content -Path $Stamp -Value $Current
 }
 
+# The meaning-search model is downloaded once, so the app itself never needs the internet
+Push-Location $AppDir
+try {
+    & $VenvPython -m src.search.semantic
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "The meaning-search model couldn't be downloaded (no internet?). Search still works by words."
+    }
+} finally { Pop-Location }
+
 # Tesseract for scanned pages: an existing TESSDATA_PREFIX, or the standard install location
 if (-not $env:TESSDATA_PREFIX) {
     $Tessdata = @((Join-Path $env:ProgramFiles "Tesseract-OCR\tessdata"),

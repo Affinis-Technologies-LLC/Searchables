@@ -12,6 +12,7 @@ from src.research.export import to_docx, to_markdown
 from src.search.library import Library
 from src.ui.pins import PinContext
 from src.ui.state import show_page
+from src.ui.related_panel import left_pane
 from src.ui.viewer import render_viewer
 
 
@@ -48,10 +49,13 @@ def render_collections(library: Library, store: CollectionStore, collection: Col
 
     list_col, viewer_col = st.columns([2, 3], gap="medium")
     with list_col:
-        st.caption(f"{len(pins)} pinned item{'s' if len(pins) != 1 else ''}, oldest first")
-        with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
-            for pin in pins:
-                _pin_card(store, pin, available=pin.doc_id in live_docs)
+        def pin_list() -> None:
+            st.caption(f"{len(pins)} pinned item{'s' if len(pins) != 1 else ''}, oldest first")
+            with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
+                for pin in pins:
+                    _pin_card(store, pin, available=pin.doc_id in live_docs)
+
+        left_pane(library, pin_list)
     with viewer_col:
         with st.container(border=True):
             render_viewer(library, st.session_state.get("viewing_pin_query", ""), None, pin_ctx)

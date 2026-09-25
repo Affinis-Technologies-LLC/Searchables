@@ -176,3 +176,6 @@ data/
 # Windows service: downloaded WinSW wrapper and its generated config (machine-specific paths)
 deploy/windows/*.exe
 deploy/windows/*.xml
+
+# Local embedding models (downloaded once; large)
+models/

@@ -1,5 +1,6 @@
 import html
 import sqlite3
+import threading
 from typing import List, Optional, Tuple
 import streamlit as st
 from src import config
@@ -10,11 +11,15 @@ from src.models import SearchResult
 from src.search.library import CONTENT_KINDS, IDENTIFIER_GROUP_TITLES, PROVISION_FILTERS, Library
 from src.search.query import IDENTIFIER_HELP, SYNTAX_HELP
 from src.research.glossary import terms_in_text
+from src.ui.auth import account_menu, require_login
 from src.ui.collections_tab import render_collections
 from src.ui.compare_tab import render_compare
 from src.ui.glossary_tab import render_glossary
-from src.ui.library_tab import render_library_tab
+from src.search import semantic
+from src.search.indexer import Indexer
+from src.ui.library_tab import indexing_indicator, render_library_tab
 from src.ui.pins import PinContext, pin_button
+from src.ui.related_panel import left_pane
 from src.ui.state import (COLLECTIONS_TAB, COMPARE_TAB, GLOSSARY_TAB, LIBRARY_TAB, MAIN_TAB, SEARCH_TAB,
                           follow_identifier, replace_identifier, select_result, set_query, show_page, trail_back)
 from src.ui.terms import glossary
@@ -55,6 +60,7 @@ st.markdown("""
     .badge-recommendation { background: #B45309; color: #FFFFFF; }
     .badge-permission { background: #4B5563; color: #FFFFFF; }
     .badge-note { background: rgba(128, 128, 128, 0.15); color: inherit; font-style: italic; }
+    .badge-meaning { background: #6D28D9; color: #FFFFFF; }
     .result-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-bottom: 2px; }
     .result-doc { font-weight: 600; }
     .result-path { font-size: 0.85rem; opacity: 0.7; margin-bottom: 8px; }
@@ -78,6 +84,25 @@ st.markdown("""
     .page-table th, .page-table td { border: 1px solid rgba(128, 128, 128, 0.35); padding: 3px 8px; text-align: left; }
     .page-table th { background: rgba(128, 128, 128, 0.1); }
     .id-trail { font-weight: 600; }
+    .exploring { font-size: 0.95rem; }
+    .trail-sep { opacity: 0.5; }
+    .related-group {
+        font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+        opacity: 0.6; margin: 10px 0 2px;
+    }
+    .related-reason { font-size: 0.8rem; opacity: 0.7; font-style: italic; margin: -8px 0 2px 2px; }
+    .related-findings { display: flex; flex-wrap: wrap; gap: 4px; margin: -8px 0 4px 2px; }
+    .finding { font-size: 0.75rem; font-weight: 600; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+    .finding-conflict { background: #FEE2E2; color: #991B1B; }
+    .finding-change { background: #FEF3C7; color: #92400E; }
+    .finding-info { background: rgba(128, 128, 128, 0.15); color: inherit; }
+    .finding-same { background: #DCFCE7; color: #166534; }
+    .closest-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 0.9rem; margin-bottom: 6px; }
+    .closest-pair > div { background: rgba(128, 128, 128, 0.08); padding: 6px 8px; border-radius: 4px; }
+    .related-preview {
+        font-size: 0.85rem; opacity: 0.75; margin: 0 0 6px; padding-left: 2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .diff-del { background: #FEE2E2; color: #991B1B; }
     .diff-ins { background: #DCFCE7; color: #166534; text-decoration: none; }
     .badge-diff-changed { background: #B45309; color: #FFFFFF; }
@@ -89,6 +114,9 @@ st.markdown("""
 
 _PROVISION_BADGES = {"requirement": "shall", "recommendation": "should", "permission": "may", "note": "note"}
 
+# Nothing below renders until the user has signed in (the setup page on first run)
+require_login()
+
 
 # Application Dependencies
 @st.cache_resource
@@ -98,12 +126,27 @@ def get_library() -> Library:
 
 
 @st.cache_resource
+def get_indexer() -> Indexer:
+    """One background indexer for the app, shared by every browser session."""
+    return Indexer()
+
+
+@st.cache_resource
+def warm_up_meaning_model() -> None:
+    """Loads the language model in the background once, so the first search doesn't wait for it."""
+    if semantic.model_files_present():
+        threading.Thread(target=semantic.get_model, name="searchables-model-load", daemon=True).start()
+
+
+@st.cache_resource
 def get_collections() -> CollectionStore:
     return CollectionStore(get_library().conn)
 
 
 library = get_library()
 store = get_collections()
+indexer = get_indexer()
+warm_up_meaning_model()
 extractor = PDFExtractor()
 documents = library.list_documents()
 
@@ -114,7 +157,9 @@ if "session_started" not in st.session_state:
     st.session_state["id_mode"] = st.query_params.get("mode") == "id"
     st.session_state["id_children"] = st.query_params.get("sub") == "1"
     try:
-        st.session_state["pending_view"] = (int(st.query_params["doc"]), int(st.query_params["page"]))
+        # Remembered with the link's own search: it applies to that search only
+        st.session_state["pending_view"] = (st.session_state["query"], int(st.query_params["doc"]),
+                                            int(st.query_params["page"]))
     except (KeyError, ValueError):
         pass
 
@@ -170,6 +215,9 @@ with st.sidebar:
         if error := st.session_state.pop("collection_error", None):
             st.error(error)
 
+    account_menu()
+    indexing_indicator(indexer)
+
     recent = library.recent_searches()
     if recent:
         st.header("Recent searches")
@@ -179,7 +227,7 @@ with st.sidebar:
 st.title("Standards Search")
 st.caption(
     f"{len(documents)} document{'s' if len(documents) != 1 else ''} in the library · "
-    "keyword search with stemming, phrases and boolean operators"
+    "search by words and meaning, phrases, boolean operators and identifiers"
 )
 
 # Only the open tab is drawn: faster, and the page viewer (used by two tabs) never appears twice
@@ -198,6 +246,9 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: 
         badges.append(f'<span class="badge badge-metric">{html.escape(block.clause_num)}</span>')
     if block.provision:
         badges.append(f'<span class="badge badge-{block.provision}">{_PROVISION_BADGES[block.provision]}</span>')
+    if res.match == "meaning":
+        badges.append('<span class="badge badge-meaning" title="Found by meaning: it doesn\u2019t contain '
+                      'your search words">meaning</span>')
     path = html.escape(block.clause_path) if block.clause_path else "No clause detected"
 
     with st.container(border=True):
@@ -209,7 +260,14 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: 
             f'<div class="result-body">{res.highlighted_text}</div>'
         )
         with st.container(horizontal=True, vertical_alignment="center"):
-            st.caption(f"{detail or f'Score {res.score:.2f}'} · {res.citation}", width="stretch")
+            if not detail:
+                if res.match == "meaning":
+                    detail = f"Matched by meaning ({res.similarity:.2f})"
+                elif res.match == "both":
+                    detail = "Matched by words and meaning"
+                else:
+                    detail = f"Score {res.score:.2f}"
+            st.caption(f"{detail} · {res.citation}", width="stretch")
             doc = documents_by_id.get(block.doc_id)
             used = terms_in_text(glossary(library, doc), block.text) if doc and block.kind == "text" else []
             if used:
@@ -267,13 +325,17 @@ def sync_link(query: str) -> None:
     st.query_params.from_dict(params)
 
 
-def open_pending_view() -> None:
-    """Shows the page named in the link this session was opened with, if it still exists."""
+def open_pending_view(query: str) -> None:
+    """
+    Shows the page named in the link this session was opened with, for the link's own search only:
+    any other search first discards it, so it can't take over the viewer later.
+    """
     pending = st.session_state.pop("pending_view", None)
-    if pending:
-        doc = library.get_document(pending[0])
-        if doc and 1 <= pending[1] <= doc.page_count:
-            show_page(*pending)
+    if pending and pending[0].strip() == query.strip():
+        _, doc_id, page = pending
+        doc = library.get_document(doc_id)
+        if doc and 1 <= page <= doc.page_count:
+            show_page(doc_id, page)
 
 
 def run_identifier_search(query: str, include_children: bool) -> Tuple[List[SearchResult], List[str]]:
@@ -330,8 +392,7 @@ def show_results(query: str, results: List[SearchResult], summary: str, pin_ctx:
     selected_index = st.session_state["selected"]
     results_col, viewer_col = st.columns([2, 3], gap="medium")
     with results_col:
-        if identifier:
-            identifier_panel(*identifier)
+        # Result navigation stays visible in both modes, so Alt+Up/Down keep working while exploring
         with st.container(horizontal=True, vertical_alignment="center"):
             st.caption(summary, width="stretch")
             st.button("▲ Prev", key="result_prev", disabled=selected_index == 0,
@@ -341,22 +402,27 @@ def show_results(query: str, results: List[SearchResult], summary: str, pin_ctx:
                       on_click=select_result, args=(selected_index + 1,),
                       shortcut="Alt+Down", help="Next result")
 
-        # Fixed-height pane scrolls on its own, so the page viewer stays in view
-        with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
-            for i, res in enumerate(results):
-                group = groups[i] if groups else None
-                if group and (i == 0 or groups[i - 1] != group):
-                    count = groups.count(group)
-                    st.markdown(f"**{IDENTIFIER_GROUP_TITLES[group]}** · {count}")
-                render_result(res, i, i == selected_index, pin_ctx,
-                              detail=IDENTIFIER_GROUP_TITLES[group] if group else "")
+        def result_list() -> None:
+            if identifier:
+                identifier_panel(*identifier)
+            # Fixed-height pane scrolls on its own, so the page viewer stays in view
+            with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
+                for i, res in enumerate(results):
+                    group = groups[i] if groups else None
+                    if group and (i == 0 or groups[i - 1] != group):
+                        count = groups.count(group)
+                        st.markdown(f"**{IDENTIFIER_GROUP_TITLES[group]}** · {count}")
+                    render_result(res, i, i == selected_index, pin_ctx,
+                                  detail=IDENTIFIER_GROUP_TITLES[group] if group else "")
 
-        st.download_button(
-            label="Download Results (CSV)",
-            data=results_to_dataframe(results).to_csv(index=False),
-            file_name="search_results.csv",
-            mime="text/csv",
-        )
+            st.download_button(
+                label="Download Results (CSV)",
+                data=results_to_dataframe(results).to_csv(index=False),
+                file_name="search_results.csv",
+                mime="text/csv",
+            )
+
+        left_pane(library, result_list)
 
     with viewer_col:
         with st.container(border=True):
@@ -432,7 +498,7 @@ if search_tab.open:
                 ):
                     st.session_state["search_key"] = search_key
                     select_result(0)
-                    open_pending_view()
+                    open_pending_view(query)
                 if id_mode:
                     passages = f"{len(results)} passage{'s' if len(results) != 1 else ''}"
                     show_results(query, results, f"**{query.strip()}** appears in **{passages}**", pin_ctx,
@@ -457,4 +523,4 @@ if collections_tab.open:
 
 if library_tab.open:
     with library_tab:
-        render_library_tab(library, extractor, documents)
+        render_library_tab(library, extractor, documents, indexer)

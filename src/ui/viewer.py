@@ -7,11 +7,12 @@ from typing import Dict, List, Optional, Tuple
 import streamlit as st
 
 from src import config
-from src.models import CrossRef, Document, RelatedPassage, ResolvedRef, Term, TextBlock
+from src.models import CrossRef, Document, ResolvedRef, Term, TextBlock
 from src.research.glossary import terms_in_text
-from src.search.library import RELATED_GROUPS, Library
+from src.search.library import Library
 from src.ui.pins import PinContext, pin_button
-from src.ui.state import PassageStop, focus_passage, follow_passage, jump_to_page, passage_back, show_page, step_page
+from src.ui.related_panel import current_focus, stop_for
+from src.ui.state import explore_passage, jump_to_page, show_page, step_page
 from src.ui.tables import table_frame, table_html
 from src.ui.terms import glossary
 from src.utils.formatting import highlight_values
@@ -52,7 +53,7 @@ def render_viewer(
 
     blocks = library.page_blocks(doc.id, page)
     page_label = next((b.display_page for b in blocks), str(page))
-    focus = _focus_block(blocks, outlined_id)
+    focus = current_focus(library)
     clause_path = focus.clause_path if focus else ""
     hit_pages, terms, matches = _page_hits(library, doc, page, blocks, query, identifier)
 
@@ -68,11 +69,8 @@ def render_viewer(
     outgoing = library.page_refs(doc.id, page)
     incoming = library.referenced_from(doc.id, page)
     page_terms = terms_in_text(glossary(library, doc), " ".join(b.text for b in blocks))
-    related = _related(library, doc, focus)
-    related_count = sum(len(items) for items in related.values())
-    page_tab, text_tab, related_tab, objects_tab, refs_tab, terms_tab = st.tabs([
+    page_tab, text_tab, objects_tab, refs_tab, terms_tab = st.tabs([
         "Page", "Text",
-        f"Related ({related_count})" if related_count else "Related",
         f"Tables & figures ({len(objects)})" if objects else "Tables & figures",
         f"References ({len(outgoing) + len(incoming)})" if outgoing or incoming else "References",
         f"Terms ({len(page_terms)})" if page_terms else "Terms",
@@ -101,9 +99,7 @@ def render_viewer(
             st.caption(" · ".join(notes))
 
     with text_tab:
-        _page_text(library, blocks, matches, outlined_id)
-    with related_tab:
-        _related_tab(doc, page, blocks, focus, related)
+        _page_text(library, blocks, matches, focus.id if focus else outlined_id)
     with objects_tab:
         _objects(library, doc, objects, pdf_path, pin_ctx)
     with refs_tab:
@@ -160,7 +156,10 @@ def _page_hits(library: Library, doc: Document, page: int, blocks: List[TextBloc
 
 
 def _page_text(library: Library, blocks: List[TextBlock], matches: Dict[int, str], outlined_id: Optional[int]) -> None:
-    parts = []
+    """The page's passages, each with a Related button that explores from it in the left pane."""
+    if not blocks:
+        st.html("<p>No text on this page.</p>")
+        return
     for block in blocks:
         css = ["context-block"]
         if block.kind == "heading":
@@ -175,8 +174,12 @@ def _page_text(library: Library, blocks: List[TextBlock], matches: Dict[int, str
             body = f"<em>[{html.escape(block.text)}]</em>"
         else:
             body = matches.get(block.id, html.escape(block.text))
-        parts.append(f'<div class="{" ".join(css)}">{body}</div>')
-    st.html("".join(parts) or "<p>No text on this page.</p>")
+        # wrap=False keeps each passage's Related button beside it rather than on a line of its own
+        with st.container(horizontal=True, wrap=False, vertical_alignment="top", gap="small"):
+            st.html(f'<div class="{" ".join(css)}">{body}</div>', width="stretch")
+            st.button("", key=f"explore_{block.id}", icon=":material/hub:", type="tertiary",
+                      on_click=explore_passage, args=(stop_for(block),),
+                      help="Related: explore what this passage connects to")
 
 
 def _objects(library: Library, doc: Document, objects: List[TextBlock], pdf_path: str,
@@ -254,64 +257,3 @@ def _terms(doc: Document, terms: List[Term]) -> None:
             st.button("Go", key=f"term_{term.clause_num}", on_click=show_page,
                       args=(doc.id, term.page, term.bbox), help="Open where this term is defined", width="content")
 
-
-def _focus_block(blocks: List[TextBlock], outlined_id: Optional[int]) -> Optional[TextBlock]:
-    """The passage the Related tab starts from: the focused one if it's on this page, else the outlined one."""
-    by_id = {b.id: b for b in blocks}
-    for block_id in (st.session_state.get("focus_block"), outlined_id):
-        if block_id in by_id:
-            return by_id[block_id]
-    return next((b for b in blocks if b.kind != "heading"), blocks[0] if blocks else None)
-
-
-def _related(library: Library, doc: Document, focus: Optional[TextBlock]) -> Dict[str, List[RelatedPassage]]:
-    if focus is None:
-        return {}
-    terms = terms_in_text(glossary(library, doc), focus.text) if focus.kind == "text" else []
-    return library.related_passages(focus, terms)
-
-
-def _stop(block: TextBlock) -> PassageStop:
-    name = block.label or block.clause_num or block.text[:24]
-    return block.doc_id, block.page, block.bbox, block.id, f"{name} (p. {block.display_page})"
-
-
-def _related_tab(doc: Document, page: int, blocks: List[TextBlock], focus: Optional[TextBlock],
-                 related: Dict[str, List[RelatedPassage]]) -> None:
-    if focus is None:
-        st.caption("No text on this page.")
-        return
-    options = [b.id for b in blocks]
-    labels = {b.id: f"{b.label or b.clause_num or '—'} · {b.text[:70]}{'…' if len(b.text) > 70 else ''}" for b in blocks}
-    # Keyed on the focus, so following a link or selecting a result re-selects the picker
-    picker_key = f"related_pick_{doc.id}_{page}_{focus.id}"
-    st.selectbox("Related to", options, index=options.index(focus.id), format_func=labels.get, key=picker_key,
-                 on_change=focus_passage, args=(doc.id, page, {b.id: b.bbox for b in blocks}, picker_key),
-                 help="The passage whose connections are listed. Follow a link to walk on from there.")
-
-    trail = st.session_state.get("passage_trail", [])
-    if len(trail) > 1:
-        with st.container(horizontal=True, vertical_alignment="center"):
-            st.html(f'<div class="id-trail">{" → ".join(html.escape(stop[4]) for stop in trail)}</div>', width="stretch")
-            st.button("Back", key="passage_back", icon=":material/arrow_back:", on_click=passage_back,
-                      help="Return to the previous passage on the trail")
-
-    if not related:
-        st.caption("Nothing related found: no references, shared identifiers, defined terms or similar wording.")
-        return
-    origin = _stop(focus)
-    for group, items in related.items():
-        st.markdown(f"**{RELATED_GROUPS[group]}**")
-        for i, item in enumerate(items):
-            block = item.block
-            where = f"{html.escape(item.doc_title)} · " if block.doc_id != doc.id else ""
-            place = html.escape(block.label or block.clause or "")
-            with st.container(horizontal=True, vertical_alignment="center"):
-                st.html(
-                    f"<small>{where}p. {html.escape(block.display_page)}{' · ' + place if place else ''}</small><br>"
-                    f"{html.escape(block.text[:180])}{'…' if len(block.text) > 180 else ''}<br>"
-                    f"<small><em>{html.escape(item.reason)}</em></small>",
-                    width="stretch",
-                )
-                st.button("Go", key=f"related_{group}_{i}", on_click=follow_passage, args=(_stop(block), origin),
-                          width="content", help="Open this passage and show what it's related to")

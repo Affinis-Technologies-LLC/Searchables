@@ -1,9 +1,11 @@
 pdf_query_engine/
 ├── .streamlit/
 │   └── config.toml             # Streamlit theme & server options
-├── app.py                      # Main entrypoint: page setup, sidebar, Search tab, wiring
+├── app.py                      # Main entrypoint: sign-in gate, page setup, sidebar, Search tab, wiring
+├── README.md                   # Overview, setup, meaning-search model, data and configuration
 ├── requirements.txt
-├── data/                       # Library: stored PDFs + SQLite index & collections (git-ignored)
+├── data/                       # Library: stored PDFs, SQLite index, collections, password hash (git-ignored)
+├── models/                     # Downloaded meaning-search model (git-ignored)
 ├── deploy/
 │   ├── macos/
 │   │   ├── run.sh                  # Run in a terminal (sets up .venv on first use)
@@ -31,17 +33,22 @@ pdf_query_engine/
 │   │   ├── __init__.py
 │   │   ├── base.py             # Abstract base retriever interface
 │   │   ├── bm25.py             # In-memory BM25 (superseded by library.py; kept for hybrid.py)
-│   │   ├── library.py          # Persistent library: documents, blocks, tables, xrefs, history, FTS5 search
+│   │   ├── indexer.py          # Background indexing queue (add, re-index, add meaning search)
+│   │   ├── library.py          # Persistent library: documents, blocks, tables, xrefs, history, keyword + meaning search, related passages
+│   │   ├── semantic.py         # Local embedding model (Microsoft E5): passage/query vectors, sentence matching
 │   │   ├── query.py            # User query → safe FTS5 query (phrases, OR, NOT, prefix)
 │   │   └── hybrid.py           # (Extensible) Dense/RRF engine
 │   ├── research/
 │   │   ├── __init__.py
+│   │   ├── assess.py           # Same-topic assessment rules: values, shall/should/may, negation, identifiers
 │   │   ├── collections.py      # Collections of pins (self-contained copies of passages/tables)
 │   │   ├── compare.py          # Edition comparison: clause pairing, word diffs, provision changes
 │   │   ├── export.py           # Collection → Markdown / Word with citations
 │   │   └── glossary.py         # Defined terms from "Terms and definitions" clauses
 │   ├── ui/
 │   │   ├── __init__.py
+│   │   ├── auth.py             # Password sign-in, lockout, idle time-out, account menu
+│   │   ├── related_panel.py    # Results | Related switch and the Related view
 │   │   ├── state.py            # Session state & navigation callbacks
 │   │   ├── viewer.py           # Page viewer: page image, text, tables & figures, references
 │   │   ├── pins.py             # Pin buttons

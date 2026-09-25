@@ -112,6 +112,18 @@ if ($LASTEXITCODE -ne 0) { throw "Upgrading pip failed." }
 & $VenvPython -m pip install -r (Join-Path $AppDir "requirements.txt") --quiet
 if ($LASTEXITCODE -ne 0) { throw "Installing requirements.txt failed." }
 
+# The meaning-search model is downloaded once here (into the project's models folder), so the service
+# never needs the internet or write access to the project
+Write-Step "Preparing the meaning-search model (downloads about 440 MB the first time)"
+Push-Location $AppDir
+try {
+    & $VenvPython -m src.search.semantic
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning ("The meaning-search model couldn't be downloaded (no internet?). Search still works by words; " +
+                       "run this script again when online, then use 'Add meaning search' in the Library tab.")
+    }
+} finally { Pop-Location }
+
 # ---- Data folder and permissions -----------------------------------------------------------
 Write-Step "Data folder: $DataDir"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null

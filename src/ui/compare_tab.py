@@ -12,6 +12,7 @@ from src.research.compare import provision_change, to_markdown, word_diff_html
 from src.search.library import Library
 from src.ui.state import show_page
 from src.ui.terms import comparison
+from src.ui.related_panel import left_pane
 from src.ui.viewer import render_viewer
 
 _STATUS_FILTERS = ["Changed", "Added", "Removed", "Renumbered", "Unchanged"]
@@ -71,10 +72,13 @@ def render_compare(library: Library, documents: List[Document]) -> None:
     shown = [d for d in diffs if _visible(d, statuses or _STATUS_FILTERS, provisions_only)]
     list_col, viewer_col = st.columns([2, 3], gap="medium")
     with list_col:
-        st.caption(f"{len(shown)} of {len(diffs)} clauses, in the newer edition's order")
-        with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
-            for i, diff in enumerate(shown):
-                _clause_card(diff, i, old, new)
+        def clause_list() -> None:
+            st.caption(f"{len(shown)} of {len(diffs)} clauses, in the newer edition's order")
+            with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
+                for i, diff in enumerate(shown):
+                    _clause_card(diff, i, old, new)
+
+        left_pane(library, clause_list)
     with viewer_col:
         with st.container(border=True):
             render_viewer(library, "")

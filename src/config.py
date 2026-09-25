@@ -7,6 +7,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("SEARCHABLES_DATA_DIR", PROJECT_ROOT / "data"))
 PDF_DIR = DATA_DIR / "pdfs"
 DB_PATH = DATA_DIR / "library.db"
+AUTH_FILE = DATA_DIR / "auth.json"  # Password hash; delete it to set a new password
+
+# Meaning-based search: a local embedding model, downloaded once into MODEL_DIR (git-ignored) and
+# pinned to an exact revision. Microsoft E5 (MIT licence). Changing the model re-embeds the library.
+MODEL_DIR = Path(os.environ.get("SEARCHABLES_MODEL_DIR", PROJECT_ROOT / "models"))
+EMBEDDING_MODEL = "intfloat/e5-base-v2"
+EMBEDDING_REVISION = "f52bf8ec8c7124536f0efb74aca902b2995e5bcd"
+EMBEDDING_DIMENSIONS = 768
+EMBEDDING_ID = f"{EMBEDDING_MODEL}@{EMBEDDING_REVISION[:12]}"  # Stored per document to spot stale vectors
+EMBEDDING_DEVICE = "cpu"
+EMBEDDING_BATCH = 32
+EMBEDDING_MAX_CHARS = 2000        # Longer passages (mostly big tables) are cut; the model reads ~512 tokens anyway
+
+# Sign-in
+MIN_PASSWORD_LENGTH = 10
+LOGIN_MAX_ATTEMPTS = 5          # Wrong passwords before sign-in is locked…
+LOGIN_LOCKOUT_SECONDS = 30      # …for this long
+SESSION_IDLE_MINUTES = 60       # Signed out after this long without using the app
 
 # Block extraction
 MIN_BLOCK_CHARS = 15            # Shorter blocks are layout noise (page numbers, stray labels)
@@ -30,6 +48,10 @@ SAME_ROW_WEIGHT = 3             # Sharing a table row counts this many times mor
 RELATED_PER_GROUP = 6           # Passages listed per group (references, shared identifiers, similar wording…)
 SIMILAR_QUERY_WORDS = 16        # Distinctive words taken from a passage to find similar ones
 SIMILAR_MIN_SHARED_WORDS = 2    # Fewer shared words than this isn't "similar"
+SAME_TOPIC_MIN_SIMILARITY = 0.85  # Meaning similarity for two passages to count as the same topic
+SAME_TOPIC_SENTENCE_SIMILARITY = 0.86  # …and at least one pair of their sentences must correspond this closely
+SAME_CONTENT_SIMILARITY = 0.97    # Every sentence this close, with no difference found: "same content"
+MIN_SENTENCE_WORDS = 6            # Shorter sentences ("RQ-0003 applies.") aren't used for pairing
 
 # Tables and figures
 CAPTION_MAX_GAP = 40            # Points between a table and its caption
@@ -51,6 +73,12 @@ OCR_LANGUAGE = "eng"
 DEFAULT_MAX_RESULTS = 25
 HEADING_SCORE_WEIGHT = 0.5      # BM25 favours very short text; keeps bare headings below body passages
 MAX_DOCUMENT_ORDER_RESULTS = 500
+# Meaning in search: keyword and meaning matches are merged by reciprocal rank fusion
+FUSION_DEPTH = 100              # Candidates taken from each method before merging
+RRF_K = 60                      # Standard fusion constant: higher flattens the difference between ranks
+MEANING_MIN_SIMILARITY = 0.78   # Meaning matches below this similarity are dropped…
+MEANING_BAND = 0.05             # …and so are those more than this below the best match
+MEANING_TABLE_PREVIEW_CHARS = 300
 
 # Page viewer
 RESULTS_PANE_HEIGHT = 900       # Pixels; the results list scrolls inside this so the page stays in view

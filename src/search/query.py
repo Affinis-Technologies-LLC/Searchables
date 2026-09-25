@@ -7,6 +7,11 @@ _WORD = re.compile(r"\w+")
 _OPERATORS = {"AND", "OR", "NOT"}
 
 SYNTAX_HELP = """
+Plain words and questions are matched **by meaning** as well as by the words themselves, so
+*how long must calibration records be kept* finds the retention rule even if it's worded differently.
+Passages found only by meaning are marked **meaning**. Using any of the syntax below searches for
+exactly those words instead.
+
 | Type | Finds |
 |---|---|
 | `calibration records` | blocks containing **both** words (any form: *records*, *recorded*) |
