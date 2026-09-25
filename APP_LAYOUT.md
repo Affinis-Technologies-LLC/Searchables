@@ -16,6 +16,7 @@ pdf_query_engine/
 │   ├── extractor/
 │   │   ├── __init__.py
 │   │   ├── pdf.py              # PyMuPDF ingestion, OCR & block extraction
+│   │   ├── identifiers.py      # Identifier discovery: candidates, families by shape, roles
 │   │   ├── objects.py          # Tables, figures (via captions) & cross-reference detection
 │   │   ├── provisions.py       # shall / should / may / NOTE classification
 │   │   └── structure.py        # Clause headings & running header/footer detection

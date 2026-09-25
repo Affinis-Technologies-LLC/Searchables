@@ -8,30 +8,44 @@ import pymupdf
 from src import config
 from src.models import BBox
 
-# "Table 5 — Limits", "Table A.1: Limits", "Table 5 (continued)". A separator (or nothing after the
-# number) is required so body sentences like "Table 5 gives the limits…" aren't taken as captions.
-# Any punctuation counts as the separator: PDFs encode the dash variously (—, –, ·, or "?" when the
-# font lacks the glyph).
-_CAPTION = r"^{word}\s+(?P<num>(?:[A-Z]\.)?\d+(?:\.\d+)*)\s*(?P<cont>\(continued\))?\s*(?:[^\w\s(]\s*(?P<title>.*))?$"
-TABLE_CAPTION = re.compile(_CAPTION.format(word="Table"))
-FIGURE_CAPTION = re.compile(_CAPTION.format(word="Figure"))
+# Table/figure numbers: "5", "A.1", "A-1", or upper-case Roman numerals ("III", "A-II") as many
+# military and government documents use. Roman numerals must end the token ("TABLE INDEX" isn't one).
+_NUM = r"(?:[A-Z][.-])?(?:\d+(?:\.\d+)*|[IVXLC]+(?![A-Za-z]))"
 
-_NUM = r"(?:[A-Z]\.)?\d+(?:\.\d+)*"
+# "Table 5 — Limits", "TABLE III. Limits.", "Table 5 (continued)". A separator (or nothing after the
+# number) is required so body sentences like "Table 5 gives the limits…" aren't taken as captions.
+# Any punctuation counts as the separator: PDFs encode the dash variously (—, –, ·, ".", or "?" when
+# the font lacks the glyph).
+_CAPTION = (r"^(?:{word}|{upper})\s+(?P<num>" + _NUM + r")\s*(?P<cont>\((?i:continued)\))?\s*"
+            r"(?:[^\w\s(]\s*(?P<title>.*))?$")
+TABLE_CAPTION = re.compile(_CAPTION.format(word="Table", upper="TABLE"))
+FIGURE_CAPTION = re.compile(_CAPTION.format(word="Figure", upper="FIGURE"))
+
 _LIST_SEP = r"\s*(?:,|and|or|to)\s*"
-_TABLE_REF = re.compile(rf"\bTables?\s+({_NUM}(?:{_LIST_SEP}{_NUM})*)")
-_FIGURE_REF = re.compile(rf"\bFigures?\s+({_NUM}(?:{_LIST_SEP}{_NUM})*)")
-_ANNEX_REF = re.compile(rf"\bAnnex(?:es)?\s+([A-Z]\b(?:{_LIST_SEP}[A-Z]\b)*)")
+_TABLE_REF = re.compile(rf"\b(?:Tables?|TABLES?)\s+({_NUM}(?:{_LIST_SEP}{_NUM})*)")
+_FIGURE_REF = re.compile(rf"\b(?:Figures?|FIGURES?)\s+({_NUM}(?:{_LIST_SEP}{_NUM})*)")
+_ANNEX_REF = re.compile(
+    rf"\b(?P<word>Annex(?:es)?|ANNEX(?:ES)?|Appendix|Appendices|APPENDIX|APPENDICES)\s+([A-Z]\b(?:{_LIST_SEP}[A-Z]\b)*)"
+)
 # Bare dotted numbers are common in body text ("1.5 times"), so a clause reference needs a lead-in
 # word; resolution later also requires the clause to exist in the document.
 # (?!\.?\d) ends the number without rejecting a sentence-final full stop ("see 4.2.")
-_CLAUSE_WORD_REF = re.compile(r"\b(?:[Ss]ub)?[Cc]lauses?\s+(\d{1,2}(?:\.\d{1,3}){0,5})(?!\.?\d)")
+_CLAUSE_WORD_REF = re.compile(
+    r"\b(?i:(?:sub)?(?:clauses?|paragraphs?|paras?\.?|sections?))\s+(\d{1,2}(?:\.\d{1,3}){0,5})(?!\.?\d)"
+)
 _CLAUSE_LEADIN_REF = re.compile(
     r"\b(?:see|in|of|to|under|per|with|from|and|according to|specified in|given in)\s+(\d{1,2}(?:\.\d{1,3}){1,5})(?!\.?\d)"
 )
+# Document designations in general form rather than a list of issuing bodies: upper-case prefix
+# words ("ISO", "ISO/IEC", "EN ISO", "MIL-STD", "STANAG") then a number of 2+ digits, with optional
+# parts, revision letter and year ("4126-1", "B31.3", "6011C", "9001:2015"). Words used for document
+# structure ("TABLE 12", "PAGE 40") are excluded.
 _STANDARD_REF = re.compile(
-    r"\b(?:ISO|IEC|EN|ASTM|ASME|API|BS|DIN|IEEE|NFPA|ANSI|CSA|UL)(?:[ /](?:IEC|EN|ISO|TS|TR|PAS))*"
-    r"\s?(?:[A-Z]{1,2}\s?)?\d+(?:[-.]\d+)*(?::\d{4})?"
+    r"\b(?:[A-Z]{2,4} )?[A-Z]{2,}(?:[/-][A-Z]{2,})*[ -](?:[A-Z]{1,2})?\d{2,}(?:[-.]\d+)*[A-Z]?(?::\d{4})?(?![\w-])"
 )
+_STRUCTURAL_WORDS = {"TABLE", "TABLES", "FIGURE", "FIGURES", "PAGE", "PAGES", "SECTION", "PARAGRAPH", "CLAUSE",
+                     "ANNEX", "APPENDIX", "NOTE", "NOTES", "EXAMPLE", "STEP", "ITEM", "VOLUME", "PART", "CHAPTER",
+                     "REV", "REVISION", "VERSION", "EDITION", "AMENDMENT", "CHANGE"}
 
 
 @dataclass
@@ -57,6 +71,7 @@ class Caption:
 
 def parse_caption(text: str) -> Optional[Caption]:
     text = " ".join(text.split())
+    # Labels are normalized ("TABLE III" → "Table III") so references in either case resolve to them
     for pattern, word in ((TABLE_CAPTION, "Table"), (FIGURE_CAPTION, "Figure")):
         match = pattern.match(text)
         if match and len(text) <= config.MAX_HEADING_CHARS * 2:
@@ -192,13 +207,16 @@ def find_xrefs(text: str, own_label: str = "") -> List[Tuple[str, str]]:
             for num in re.findall(_NUM, match.group(1)):
                 refs.append((match.start(), kind, f"{word} {num}"))
     for match in _ANNEX_REF.finditer(text):
-        for letter in re.findall(r"\b[A-Z]\b", match.group(1)):
-            refs.append((match.start(), "annex", f"Annex {letter}"))
+        word = "Appendix" if match.group("word").lower().startswith("append") else "Annex"
+        for letter in re.findall(r"\b[A-Z]\b", match.group(2)):
+            refs.append((match.start(), "annex", f"{word} {letter}"))
     for pattern in (_CLAUSE_WORD_REF, _CLAUSE_LEADIN_REF):
         for match in pattern.finditer(text):
             refs.append((match.start(1), "clause", match.group(1)))
     for match in _STANDARD_REF.finditer(text):
-        refs.append((match.start(), "standard", " ".join(match.group(0).split())))
+        designation = " ".join(match.group(0).split())
+        if not set(re.split(r"[ /-]", designation)) & _STRUCTURAL_WORDS:
+            refs.append((match.start(), "standard", designation))
 
     seen, ordered = set(), []
     for _, kind, target in sorted(refs):

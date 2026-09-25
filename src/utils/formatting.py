@@ -24,6 +24,22 @@ def apply_term_highlights(text: str, query: str) -> str:
     parts.append(html.escape(text[last:]))
     return "".join(parts)
 
+def highlight_values(text: str, values) -> str:
+    """Escapes text and marks exact occurrences of `values` (identifiers as written), longest first."""
+    values = sorted({v for v in values if v}, key=len, reverse=True)
+    if not values:
+        return html.escape(text)
+    # Not inside a longer token: "K3.5" isn't marked within "K3.5C1" or "XK3.5"
+    pattern = re.compile(rf"(?<![\w.-])(?:{'|'.join(map(re.escape, values))})(?![\w-])")
+    parts: List[str] = []
+    last = 0
+    for match in pattern.finditer(text):
+        parts.append(html.escape(text[last:match.start()]))
+        parts.append(f'<mark class="query-hit">{html.escape(match.group())}</mark>')
+        last = match.end()
+    parts.append(html.escape(text[last:]))
+    return "".join(parts)
+
 def marked_to_html(marked: str, start: str, end: str) -> str:
     """Escapes text whose hits are wrapped in start/end marker characters, then turns markers into <mark>."""
     escaped = html.escape(marked)

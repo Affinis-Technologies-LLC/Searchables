@@ -7,6 +7,8 @@ from src.extractor.structure import TERMS_CLAUSE
 from src.models import Term, TextBlock
 
 _NOTE_TO_ENTRY = re.compile(r"^(?:Note \d+ to entry|NOTE|EXAMPLE|\[SOURCE)")
+# Sub-clauses that introduce lists or groups rather than define a term ("3.1 Acronyms", "3.1 General")
+_LIST_ENTRY = re.compile(r"^(?:acronyms?|abbreviations?|general(?: terms)?)\b", re.IGNORECASE)
 
 
 def build_glossary(blocks: Sequence[TextBlock]) -> List[Term]:
@@ -32,6 +34,8 @@ def build_glossary(blocks: Sequence[TextBlock]) -> List[Term]:
     for num, entry in entries.items():
         heading = next((b for b in entry if b.kind == "heading"), entry[0])
         title = entry[0].clause_title
+        if TERMS_CLAUSE.search(title) or _LIST_ENTRY.search(title):
+            continue  # "3.1 Acronyms." and similar introduce lists, not a defined term
         parts = []
         for block in entry:
             if block.kind != "text":
@@ -40,7 +44,8 @@ def build_glossary(blocks: Sequence[TextBlock]) -> List[Term]:
             # A heading can share a block with the start of its definition ("3.1 set pressure predetermined…")
             prefix = f"{num} {title}"
             if text.startswith(prefix):
-                text = text[len(prefix):].strip()
+                # Run-in entries ("3.1 Term. Definition…") leave the title's full stop behind
+                text = text[len(prefix):].lstrip(" .:—–-").strip()
             if text and not _NOTE_TO_ENTRY.match(text):
                 parts.append(text)
         if not parts:

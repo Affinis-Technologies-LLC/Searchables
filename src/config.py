@@ -11,9 +11,25 @@ DB_PATH = DATA_DIR / "library.db"
 # Block extraction
 MIN_BLOCK_CHARS = 15            # Shorter blocks are layout noise (page numbers, stray labels)
 MAX_HEADING_CHARS = 120         # Longer lines are body text, never clause headings
+MAX_RUN_IN_TITLE_WORDS = 8      # "4.2.1 Transmit rules. The system…": longer "titles" are sentences
 
 # Bump when extraction gains features; documents indexed by an older version can be re-indexed
-EXTRACTOR_VERSION = 2           # 2: tables, figures, cross-references
+EXTRACTOR_VERSION = 3           # 2: tables, figures, cross-references; 3: MIL-style conventions, identifiers
+
+# Identifier discovery: a family (shape such as "K#.#") counts as identifiers when it has at least
+# this many distinct values, appearing in at least this many passages. Adjustable per document in
+# the Library tab.
+IDENTIFIER_MIN_DISTINCT = 3
+IDENTIFIER_MIN_PASSAGES = 5
+IDENTIFIER_EXAMPLES = 4         # Example values shown per family
+IDENTIFIER_SUGGESTIONS = 12     # Offered when a searched identifier isn't found
+RELATED_IDENTIFIERS = 15        # Related identifiers listed for a searched identifier
+SAME_ROW_WEIGHT = 3             # Sharing a table row counts this many times more than sharing a passage
+
+# Related passages (viewer's Related tab)
+RELATED_PER_GROUP = 6           # Passages listed per group (references, shared identifiers, similar wording…)
+SIMILAR_QUERY_WORDS = 16        # Distinctive words taken from a passage to find similar ones
+SIMILAR_MIN_SHARED_WORDS = 2    # Fewer shared words than this isn't "similar"
 
 # Tables and figures
 CAPTION_MAX_GAP = 40            # Points between a table and its caption

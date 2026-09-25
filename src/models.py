@@ -67,6 +67,7 @@ class ResolvedRef:
     page: Optional[int] = None
     bbox: Optional[BBox] = None
     doc_title: str = ""
+    block_id: Optional[int] = None  # The passage it points to (a document's first passage for documents)
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,64 @@ class ClauseDiff:
         return (self.old.provisions if self.old else (0, 0, 0)) != (self.new.provisions if self.new else (0, 0, 0))
 
 
+@dataclass(frozen=True)
+class IdentifierOccurrence:
+    block_id: int               # Local id at extraction; the stored block id afterwards
+    value: str                  # As written: "FLD 2041"
+    key: str                    # Matching form: "FLD2041"
+    family: str                 # Shape: "FLD#"
+    role: str                   # "heading", "caption", "table" or "text"
+    row: Optional[int] = None   # Table row (0 = header row) for role "table"
+
+
+@dataclass(frozen=True)
+class IdentifierFamily:
+    doc_id: int
+    family: str                 # Shape used for matching: "K#.#C#"
+    display: str                # Shape as usually written: "FLD #"
+    distinct_values: int
+    passages: int
+    examples: str
+    auto_enabled: bool          # Discovery's own verdict
+    user_enabled: Optional[bool] = None  # The user's override, kept across re-indexing
+
+    @property
+    def enabled(self) -> bool:
+        return self.auto_enabled if self.user_enabled is None else self.user_enabled
+
+
+@dataclass(frozen=True)
+class IdentifierHit:
+    """A passage containing a searched identifier."""
+    block: TextBlock
+    doc_title: str
+    group: str                  # "defined", "table", "rule" or "mention"
+    values: Tuple[str, ...]     # How the identifier is written there, longest first
+    rows: Tuple[int, ...] = ()  # Table rows containing it (0 = header row)
+
+
+@dataclass(frozen=True)
+class RelatedIdentifier:
+    key: str
+    value: str
+    same_row: int               # Times it shares a table row with the searched identifier
+    same_passage: int           # Times it shares a passage
+
+
+@dataclass(frozen=True)
+class RelatedIdentifiers:
+    parent: Optional[str]
+    children: Tuple[str, ...]
+    related: Tuple[RelatedIdentifier, ...]
+
+
+@dataclass(frozen=True)
+class RelatedPassage:
+    block: TextBlock
+    doc_title: str
+    reason: str                 # Why it's related: "References Table I", "Shares K3.5, FLD 2041"…
+
+
 @dataclass
 class ExtractedDocument:
     title: str
@@ -149,6 +208,7 @@ class ExtractedDocument:
     blocks: List[TextBlock] = field(default_factory=list)
     tables: List[TableData] = field(default_factory=list)     # block_id refers to TextBlock.id (local)
     xrefs: List[CrossRef] = field(default_factory=list)       # block_id refers to TextBlock.id (local)
+    identifiers: List[IdentifierOccurrence] = field(default_factory=list)  # block_id is local too
     ocr_pages: List[int] = field(default_factory=list)         # Pages whose text came from OCR
     unreadable_pages: List[int] = field(default_factory=list)  # Scanned pages OCR could not handle
 

@@ -12,6 +12,7 @@ from src.models import BBox
 _HIT_COLOR = (1.0, 0.85, 0.1)       # Yellow highlighter
 _TARGET_COLOR = (0.15, 0.39, 0.92)  # Matches the app's primary blue
 _TARGET_PADDING = 4                 # Points between the passage and its outline
+_WORD_PUNCTUATION = ".,;:!?()[]{}\"'“”‘’"  # Stripped from page words before comparing with terms
 
 
 @dataclass(frozen=True)
@@ -44,9 +45,16 @@ def render_page(
             except Exception:
                 textpage = None  # Fall back to the outline alone
 
+        # Single-word terms match whole words only: search_for() finds substrings, which would mark
+        # "K3.5" inside "K3.5C1" and "calibration" inside "recalibration"
+        words = page.get_text("words", textpage=textpage) if terms else []
         quads = []
         for term in terms:
-            quads.extend(page.search_for(term, quads=True, textpage=textpage))
+            if " " in term:
+                quads.extend(page.search_for(term, quads=True, textpage=textpage))
+            else:
+                wanted = term.lower()
+                quads.extend(pymupdf.Rect(w[:4]).quad for w in words if w[4].strip(_WORD_PUNCTUATION).lower() == wanted)
         if quads:
             highlight = page.add_highlight_annot(quads)
             highlight.set_colors(stroke=_HIT_COLOR)

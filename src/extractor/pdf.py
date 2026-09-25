@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from src import config
+from src.extractor.identifiers import extract_occurrences
 from src.extractor.objects import PageFigure, PageTable, find_figures, find_tables, find_xrefs, parse_caption
 from src.extractor.provisions import classify_provision
 from src.extractor.structure import HeadingDetector, find_running_text, is_running_text
@@ -89,6 +90,7 @@ class PDFExtractor:
                 CrossRef(block_id=block.id, kind=kind, target=target)
                 for kind, target in find_xrefs(block.text, own)
             )
+        result.identifiers = extract_occurrences(result.blocks, result.tables)
         return result
 
     def _read_pages(

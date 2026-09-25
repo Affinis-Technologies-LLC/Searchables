@@ -1,11 +1,14 @@
 import html
 import sqlite3
+from typing import List, Optional, Tuple
 import streamlit as st
 from src import config
 from src.extractor.pdf import PDFExtractor
 from src.research.collections import CollectionStore
-from src.search.library import CONTENT_KINDS, PROVISION_FILTERS, Library
-from src.search.query import SYNTAX_HELP
+from src.extractor.identifiers import identifier_key
+from src.models import SearchResult
+from src.search.library import CONTENT_KINDS, IDENTIFIER_GROUP_TITLES, PROVISION_FILTERS, Library
+from src.search.query import IDENTIFIER_HELP, SYNTAX_HELP
 from src.research.glossary import terms_in_text
 from src.ui.collections_tab import render_collections
 from src.ui.compare_tab import render_compare
@@ -13,10 +16,11 @@ from src.ui.glossary_tab import render_glossary
 from src.ui.library_tab import render_library_tab
 from src.ui.pins import PinContext, pin_button
 from src.ui.state import (COLLECTIONS_TAB, COMPARE_TAB, GLOSSARY_TAB, LIBRARY_TAB, MAIN_TAB, SEARCH_TAB,
-                          select_result, set_query, show_page)
+                          follow_identifier, replace_identifier, select_result, set_query, show_page, trail_back)
 from src.ui.terms import glossary
 from src.ui.viewer import render_viewer
-from src.utils.formatting import results_to_dataframe
+from src.ui.tables import table_rows_html
+from src.utils.formatting import highlight_values, results_to_dataframe
 
 # Page Configuration
 st.set_page_config(
@@ -73,6 +77,7 @@ st.markdown("""
     .page-table { border-collapse: collapse; font-size: 0.85rem; margin-bottom: 4px; }
     .page-table th, .page-table td { border: 1px solid rgba(128, 128, 128, 0.35); padding: 3px 8px; text-align: left; }
     .page-table th { background: rgba(128, 128, 128, 0.1); }
+    .id-trail { font-weight: 600; }
     .diff-del { background: #FEE2E2; color: #991B1B; }
     .diff-ins { background: #DCFCE7; color: #166534; text-decoration: none; }
     .badge-diff-changed { background: #B45309; color: #FFFFFF; }
@@ -106,6 +111,8 @@ documents = library.list_documents()
 if "session_started" not in st.session_state:
     st.session_state["session_started"] = True
     st.session_state["query"] = st.query_params.get("q", "")
+    st.session_state["id_mode"] = st.query_params.get("mode") == "id"
+    st.session_state["id_children"] = st.query_params.get("sub") == "1"
     try:
         st.session_state["pending_view"] = (int(st.query_params["doc"]), int(st.query_params["page"]))
     except (KeyError, ValueError):
@@ -182,7 +189,7 @@ search_tab, compare_tab, glossary_tab, collections_tab, library_tab = st.tabs(
 documents_by_id = {d.id: d for d in documents}
 
 
-def render_result(res, index: int, selected: bool, pin_ctx: PinContext) -> None:
+def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: str = "") -> None:
     block = res.block
     badges = []
     if block.is_object:
@@ -202,7 +209,7 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext) -> None:
             f'<div class="result-body">{res.highlighted_text}</div>'
         )
         with st.container(horizontal=True, vertical_alignment="center"):
-            st.caption(f"Score {res.score:.2f} · {res.citation}", width="stretch")
+            st.caption(f"{detail or f'Score {res.score:.2f}'} · {res.citation}", width="stretch")
             doc = documents_by_id.get(block.doc_id)
             used = terms_in_text(glossary(library, doc), block.text) if doc and block.kind == "text" else []
             if used:
@@ -251,6 +258,10 @@ def sync_link(query: str) -> None:
         st.query_params.clear()
         return
     params = {"q": query}
+    if st.session_state.get("id_mode"):
+        params["mode"] = "id"
+        if st.session_state.get("id_children"):
+            params["sub"] = "1"
     if st.session_state.get("view_doc") is not None:
         params |= {"doc": str(st.session_state["view_doc"]), "page": str(st.session_state["view_page"])}
     st.query_params.from_dict(params)
@@ -265,70 +276,170 @@ def open_pending_view() -> None:
             show_page(*pending)
 
 
+def run_identifier_search(query: str, include_children: bool) -> Tuple[List[SearchResult], List[str]]:
+    """Identifier matches as result cards, in group order (headings and captions, table rows, rules, mentions)."""
+    hits = library.identifier_search(query, include_children, doc_ids=[d.id for d in selected_docs],
+                                     kinds=kinds, provisions=provisions)
+    if st.session_state.get("last_recorded") != query:
+        library.record_search(query)
+        st.session_state["last_recorded"] = query
+    return [
+        SearchResult(
+            block=hit.block, score=0.0, rank=rank, doc_title=hit.doc_title,
+            highlighted_text=(table_rows_html(library, hit.block, hit.rows, hit.values) if hit.group == "table"
+                              else highlight_values(hit.block.text, hit.values)),
+        )
+        for rank, hit in enumerate(hits, 1)
+    ], [hit.group for hit in hits]
+
+
+def identifier_panel(query: str, include_children: bool) -> None:
+    """Trail of followed identifiers, parent and sub-identifiers, and related identifiers to follow."""
+    related = library.related_identifiers(query, include_children, doc_ids=[d.id for d in selected_docs])
+    trail = st.session_state.get("id_trail", [query])
+    with st.container(border=True):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.html(f'<div class="id-trail">{" → ".join(html.escape(t) for t in trail)}</div>', width="stretch")
+            st.button("Back", key="id_back", icon=":material/arrow_back:", disabled=len(trail) < 2,
+                      on_click=trail_back, help="Return to the previous identifier on the trail")
+        groups = []
+        if related.parent:
+            groups.append(("Part of", [(related.parent, "The identifier this one extends")]))
+        if related.children:
+            groups.append(("Sub-identifiers", [(c, "Extends this identifier") for c in related.children]))
+        if related.related:
+            groups.append(("Related", [
+                (r.value, f"Shares {r.same_row} table row{'s' if r.same_row != 1 else ''} and "
+                          f"{r.same_passage} passage{'s' if r.same_passage != 1 else ''}")
+                for r in related.related
+            ]))
+        if not groups:
+            st.caption("No related identifiers found. Only switched-on identifier patterns are used "
+                       "(Library → Manage → Identifiers).")
+        for title, items in groups:
+            with st.container(horizontal=True, wrap=True, vertical_alignment="center", gap="small"):
+                st.caption(title, width="content")
+                for i, (value, why) in enumerate(items):
+                    st.button(value, key=f"id_{title}_{i}", on_click=follow_identifier, args=(value,),
+                              help=why, type="tertiary")
+
+
+def show_results(query: str, results: List[SearchResult], summary: str, pin_ctx: PinContext,
+                 groups: Optional[List[str]] = None, identifier: Optional[tuple] = None) -> None:
+    """Results list beside the page viewer; with `groups`, a heading starts each group of identifier results."""
+    selected_index = st.session_state["selected"]
+    results_col, viewer_col = st.columns([2, 3], gap="medium")
+    with results_col:
+        if identifier:
+            identifier_panel(*identifier)
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.caption(summary, width="stretch")
+            st.button("▲ Prev", key="result_prev", disabled=selected_index == 0,
+                      on_click=select_result, args=(selected_index - 1,),
+                      shortcut="Alt+Up", help="Previous result")
+            st.button("Next ▼", key="result_next", disabled=selected_index >= len(results) - 1,
+                      on_click=select_result, args=(selected_index + 1,),
+                      shortcut="Alt+Down", help="Next result")
+
+        # Fixed-height pane scrolls on its own, so the page viewer stays in view
+        with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
+            for i, res in enumerate(results):
+                group = groups[i] if groups else None
+                if group and (i == 0 or groups[i - 1] != group):
+                    count = groups.count(group)
+                    st.markdown(f"**{IDENTIFIER_GROUP_TITLES[group]}** · {count}")
+                render_result(res, i, i == selected_index, pin_ctx,
+                              detail=IDENTIFIER_GROUP_TITLES[group] if group else "")
+
+        st.download_button(
+            label="Download Results (CSV)",
+            data=results_to_dataframe(results).to_csv(index=False),
+            file_name="search_results.csv",
+            mime="text/csv",
+        )
+
+    with viewer_col:
+        with st.container(border=True):
+            render_viewer(library, query, results[selected_index].block, pin_ctx, identifier=identifier)
+
+
 if search_tab.open:
     with search_tab:
         if not documents:
             st.info("The library is empty. Add standards in the **Library** tab to start searching.")
         else:
-            query_col, help_col = st.columns([6, 1], vertical_alignment="bottom")
-            # The box's widget state is discarded while another tab is open, so "query" is the source of truth
+            query_col, mode_col, help_col = st.columns([6, 1.4, 1], vertical_alignment="bottom")
+            # Widget state is discarded while another tab is open, so "query" and "id_mode" are the source of truth
+            id_mode = mode_col.toggle(
+                "Identifier", value=st.session_state.get("id_mode", False), key="id_mode_input",
+                help="Search for an identifier (a message label, field, requirement or part number…) "
+                     "instead of words: exact matches, grouped by role, with related identifiers",
+            )
+            st.session_state["id_mode"] = id_mode
             query = query_col.text_input(
                 "Search the library",
                 value=st.session_state.get("query", ""),
                 key="query_input",
-                placeholder='e.g. "shall not exceed" calibration -software',
+                placeholder="An identifier, e.g. a message label, field or part number" if id_mode
+                else 'e.g. "shall not exceed" calibration -software',
             )
             st.session_state["query"] = query
             with help_col.popover("Syntax", width="stretch"):
-                st.markdown(SYNTAX_HELP)
+                st.markdown(IDENTIFIER_HELP if id_mode else SYNTAX_HELP)
+
+            include_children = False
+            if id_mode:
+                include_children = st.checkbox(
+                    "Include sub-identifiers", value=st.session_state.get("id_children", False), key="id_children_input",
+                    help="Also match identifiers that extend this one (e.g. a message's words or sub-parts)",
+                )
+                st.session_state["id_children"] = include_children
+                # Typing an identifier starts a new trail; following one from the panel extends it
+                trail = st.session_state.get("id_trail", [])
+                if query.strip() and (not trail or identifier_key(trail[-1]) != identifier_key(query)):
+                    st.session_state["id_trail"] = [query.strip()]
 
             pin_ctx = PinContext(library, store, active.id, query, store.pinned_keys(active.id))
-            outcome = run_search(query) if query.strip() else None
-            if outcome is not None:
-                results, total = outcome
+            groups = None
+            if not query.strip():
+                results = None
+            elif id_mode:
+                results, groups = run_identifier_search(query, include_children)
                 if not results:
+                    st.warning(f"No passages contain the identifier “{query.strip()}” in the current scope.")
+                    suggestions = library.identifier_suggestions(query, doc_ids=[d.id for d in selected_docs])
+                    if suggestions:
+                        with st.container(horizontal=True, wrap=True, vertical_alignment="center", gap="small"):
+                            st.caption("Did you mean", width="content")
+                            for i, value in enumerate(suggestions):
+                                st.button(value, key=f"suggest_{i}", on_click=replace_identifier, args=(value,),
+                                          type="tertiary")
+            else:
+                outcome = run_search(query)
+                results = outcome[0] if outcome else None
+                if outcome and not results:
                     st.warning("No passages match. Try fewer words, a prefix like `calib*`, OR between "
                                "alternatives, or fewer filters.")
+
+            if results:
+                # A new search (or scope/order/mode change) starts the viewer on the first result
+                search_key = (query, id_mode, include_children, tuple(d.id for d in selected_docs), document_order,
+                              max_results, tuple(kinds), tuple(provisions))
+                st.session_state["result_locations"] = [(r.block.doc_id, r.block.page, r.block.id) for r in results]
+                if (
+                    st.session_state.get("search_key") != search_key
+                    or st.session_state.get("selected", 0) >= len(results)  # Library changed under the same search
+                ):
+                    st.session_state["search_key"] = search_key
+                    select_result(0)
+                    open_pending_view()
+                if id_mode:
+                    passages = f"{len(results)} passage{'s' if len(results) != 1 else ''}"
+                    show_results(query, results, f"**{query.strip()}** appears in **{passages}**", pin_ctx,
+                                 groups=groups, identifier=(query, include_children))
                 else:
-                    # A new search (or scope/order change) starts the viewer on the first result
-                    search_key = (query, tuple(d.id for d in selected_docs), document_order, max_results,
-                                  tuple(kinds), tuple(provisions))
-                    st.session_state["result_locations"] = [(r.block.doc_id, r.block.page) for r in results]
-                    if (
-                        st.session_state.get("search_key") != search_key
-                        or st.session_state.get("selected", 0) >= len(results)  # Library changed under the same search
-                    ):
-                        st.session_state["search_key"] = search_key
-                        select_result(0)
-                        open_pending_view()
-                    selected_index = st.session_state["selected"]
-
-                    results_col, viewer_col = st.columns([2, 3], gap="medium")
-                    with results_col:
-                        with st.container(horizontal=True, vertical_alignment="center"):
-                            st.caption(f"Showing **{len(results)}** of **{total}** matching passages", width="stretch")
-                            st.button("▲ Prev", key="result_prev", disabled=selected_index == 0,
-                                      on_click=select_result, args=(selected_index - 1,),
-                                      shortcut="Alt+Up", help="Previous result")
-                            st.button("Next ▼", key="result_next", disabled=selected_index >= len(results) - 1,
-                                      on_click=select_result, args=(selected_index + 1,),
-                                      shortcut="Alt+Down", help="Next result")
-
-                        # Fixed-height pane scrolls on its own, so the page viewer stays in view
-                        with st.container(height=config.RESULTS_PANE_HEIGHT, border=False):
-                            for i, res in enumerate(results):
-                                render_result(res, i, i == selected_index, pin_ctx)
-
-                        st.download_button(
-                            label="Download Results (CSV)",
-                            data=results_to_dataframe(results).to_csv(index=False),
-                            file_name="search_results.csv",
-                            mime="text/csv",
-                        )
-
-                    with viewer_col:
-                        with st.container(border=True):
-                            render_viewer(library, query, results[selected_index].block, pin_ctx)
+                    show_results(query, results, f"Showing **{len(results)}** of **{outcome[1]}** matching passages",
+                                 pin_ctx)
             sync_link(query)
 
 if compare_tab.open:

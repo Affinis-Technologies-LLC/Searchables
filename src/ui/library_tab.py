@@ -82,7 +82,8 @@ def render_library_tab(library: Library, extractor: PDFExtractor, documents: Lis
         with st.container(border=True):
             st.warning(
                 f"{len(outdated)} document{'s were' if plural else ' was'} indexed by an older version and "
-                f"{'are' if plural else 'is'} missing tables, figures and cross-references."
+                f"{'are' if plural else 'is'} missing newer features: tables, figures, cross-references, "
+                "military-style formatting and identifier discovery."
             )
             if st.button(f"Re-index {len(outdated)} document{'s' if plural else ''}", type="primary"):
                 _reindex(library, extractor, outdated)
@@ -134,4 +135,53 @@ def render_library_tab(library: Library, extractor: PDFExtractor, documents: Lis
         st.write(f"Remove **{target.title}** and its index from the library? Pins keep their text and citation.")
         if st.button("Delete permanently", type="primary"):
             library.delete_document(target.id)
+            st.rerun()
+
+    _identifiers_panel(library, target)
+
+
+def _identifiers_panel(library: Library, doc: Document) -> None:
+    st.subheader("Identifiers")
+    st.caption(
+        "Identifier patterns are discovered from the document itself: a pattern (# stands for any number) "
+        "with several different values used across passages, such as message labels or field numbers. "
+        "Switch patterns on or off here; your choices are kept when the document is re-indexed."
+    )
+    if doc.extract_version < 3:
+        st.info("Re-index this document to discover its identifiers.")
+        return
+    families = library.identifier_families(doc.id)
+    if not families:
+        st.caption("No identifier-like patterns found in this document.")
+        return
+
+    frame = pd.DataFrame([
+        {
+            "Use": f.enabled,
+            "Pattern": f.display,
+            "Values": f.distinct_values,
+            "Passages": f.passages,
+            "Examples": f.examples,
+            "Setting": "automatic" if f.user_enabled is None else "your choice",
+        }
+        for f in families
+    ])
+    edited = st.data_editor(
+        frame, key=f"families_{doc.id}", hide_index=True, width="stretch",
+        disabled=["Pattern", "Values", "Passages", "Examples", "Setting"],
+        column_config={"Use": st.column_config.CheckboxColumn("Use", help="Treat this pattern as identifiers")},
+    )
+    changed = False
+    for family, use in zip(families, edited["Use"]):
+        if bool(use) != family.enabled:
+            # Matching discovery's own verdict returns the family to automatic
+            library.set_family_enabled(doc.id, family.family, None if bool(use) == family.auto_enabled else bool(use))
+            changed = True
+    if changed:
+        st.rerun()
+
+    if any(f.user_enabled is not None for f in families):
+        if st.button("Reset all to automatic", key=f"reset_families_{doc.id}"):
+            library.reset_families(doc.id)
+            st.session_state.pop(f"families_{doc.id}", None)
             st.rerun()

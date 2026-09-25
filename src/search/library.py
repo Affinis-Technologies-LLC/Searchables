@@ -1,17 +1,21 @@
 """Persistent document library: PDFs on disk, blocks and a full-text index in SQLite."""
 import hashlib
+import math
+from collections import Counter
 import json
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src import config
+from src.extractor.identifiers import family_of, identifier_key, parent_key, summarize_families
 from src.extractor.objects import parse_caption, standard_pattern
 from src.extractor.pdf import PDFExtractor, ProgressCallback
 from src.extractor.provisions import NOTE, PERMISSION, RECOMMENDATION, REQUIREMENT, classify_provision
-from src.models import CrossRef, Document, ExtractedDocument, ResolvedRef, SearchResult, TableData, TextBlock
+from src.models import (CrossRef, Document, ExtractedDocument, IdentifierFamily, IdentifierHit, RelatedIdentifier,
+                        RelatedIdentifiers, RelatedPassage, ResolvedRef, SearchResult, TableData, Term, TextBlock)
 from src.search.query import build_fts_query
 from src.utils.formatting import marked_to_html
 
@@ -76,6 +80,31 @@ CREATE TABLE IF NOT EXISTS xrefs (
 );
 CREATE INDEX IF NOT EXISTS xrefs_target ON xrefs(doc_id, kind, target);
 CREATE INDEX IF NOT EXISTS xrefs_block ON xrefs(block_id);
+CREATE TABLE IF NOT EXISTS identifier_occurrences (
+    id       INTEGER PRIMARY KEY,
+    doc_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    block_id INTEGER NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+    key      TEXT NOT NULL,     -- Matching form: "FLD2041"
+    value    TEXT NOT NULL,     -- As written: "FLD 2041"
+    family   TEXT NOT NULL,     -- Shape: "FLD#"
+    role     TEXT NOT NULL,     -- heading, caption, table, text
+    row      INTEGER            -- Table row for role "table" (0 = header row)
+);
+CREATE INDEX IF NOT EXISTS identifier_key ON identifier_occurrences(key, doc_id);
+CREATE INDEX IF NOT EXISTS identifier_block ON identifier_occurrences(block_id);
+CREATE INDEX IF NOT EXISTS identifier_family ON identifier_occurrences(doc_id, family);
+-- One row per shape per document. user_enabled (NULL = follow discovery) survives re-indexing.
+CREATE TABLE IF NOT EXISTS identifier_families (
+    doc_id          INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    family          TEXT NOT NULL,
+    display         TEXT NOT NULL,
+    distinct_values INTEGER NOT NULL,
+    passages        INTEGER NOT NULL,
+    examples        TEXT NOT NULL,
+    auto_enabled    INTEGER NOT NULL,
+    user_enabled    INTEGER,
+    PRIMARY KEY (doc_id, family)
+);
 CREATE TABLE IF NOT EXISTS search_history (
     query       TEXT PRIMARY KEY,
     searched_at TEXT NOT NULL
@@ -211,6 +240,28 @@ class Library:
             "INSERT INTO xrefs (doc_id, block_id, kind, target) VALUES (?, ?, ?, ?)",
             [(doc_id, first_id + x.block_id, x.kind, x.target) for x in extracted.xrefs],
         )
+        self.conn.executemany(
+            "INSERT INTO identifier_occurrences (doc_id, block_id, key, value, family, role, row) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(doc_id, first_id + o.block_id, o.key, o.value, o.family, o.role, o.row) for o in extracted.identifiers],
+        )
+        families = summarize_families(extracted.identifiers, doc_id)
+        self.conn.executemany(
+            "INSERT INTO identifier_families (doc_id, family, display, distinct_values, passages, examples, auto_enabled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(doc_id, family) DO UPDATE SET "
+            "display = excluded.display, distinct_values = excluded.distinct_values, passages = excluded.passages, "
+            "examples = excluded.examples, auto_enabled = excluded.auto_enabled",
+            [(f.doc_id, f.family, f.display, f.distinct_values, f.passages, f.examples, int(f.auto_enabled))
+             for f in families],
+        )
+        # Families gone after re-indexing are dropped, unless the user chose a setting for them
+        present = [f.family for f in families]
+        placeholders = ", ".join("?" * len(present)) or "''"  # NOT IN () is invalid SQL
+        self.conn.execute(
+            f"DELETE FROM identifier_families WHERE doc_id = ? AND user_enabled IS NULL "
+            f"AND family NOT IN ({placeholders})",
+            [doc_id, *present],
+        )
 
     def _delete_index(self, doc_id: int) -> None:
         # FTS5 tables have no foreign keys, so their rows go explicitly; the rest cascade from blocks
@@ -248,6 +299,218 @@ class Library:
     def _document_by_sha(self, sha256: str) -> Optional[Document]:
         row = self.conn.execute("SELECT * FROM documents WHERE sha256 = ?", (sha256,)).fetchone()
         return Document(**dict(row)) if row else None
+
+    # ---- Identifiers -----------------------------------------------------------------------
+
+    def identifier_families(self, doc_id: int) -> List[IdentifierFamily]:
+        rows = self.conn.execute(
+            "SELECT * FROM identifier_families WHERE doc_id = ? ORDER BY auto_enabled DESC, passages DESC", (doc_id,)
+        ).fetchall()
+        return [
+            IdentifierFamily(
+                doc_id=row["doc_id"], family=row["family"], display=row["display"],
+                distinct_values=row["distinct_values"], passages=row["passages"], examples=row["examples"],
+                auto_enabled=bool(row["auto_enabled"]),
+                user_enabled=None if row["user_enabled"] is None else bool(row["user_enabled"]),
+            )
+            for row in rows
+        ]
+
+    def enabled_families(self, doc_id: int) -> set:
+        return {f.family for f in self.identifier_families(doc_id) if f.enabled}
+
+    def set_family_enabled(self, doc_id: int, family: str, enabled: Optional[bool]) -> None:
+        """Overrides discovery for one family; None returns it to automatic."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE identifier_families SET user_enabled = ? WHERE doc_id = ? AND family = ?",
+                (None if enabled is None else int(enabled), doc_id, family),
+            )
+
+    def reset_families(self, doc_id: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE identifier_families SET user_enabled = NULL WHERE doc_id = ?", (doc_id,))
+
+    # ---- Identifier search ----------------------------------------------------------------
+
+    def _scope(self, doc_ids: Optional[Sequence[int]], kinds: Optional[Sequence[str]] = None,
+               provisions: Optional[Sequence[str]] = None, alias: str = "o") -> Tuple[str, list]:
+        """SQL conditions for the sidebar's search scope, on occurrences (`alias`) and blocks (b)."""
+        where, params = "", []
+        if doc_ids:
+            where += f" AND {alias}.doc_id IN ({', '.join('?' * len(doc_ids))})"
+            params.extend(doc_ids)
+        if kinds:
+            where += f" AND b.kind IN ({', '.join('?' * len(kinds))})"
+            params.extend(kinds)
+        if provisions:
+            where += f" AND b.provision IN ({', '.join('?' * len(provisions))})"
+            params.extend(provisions)
+        return where, params
+
+    def _matching_keys(self, key: str, include_children: bool, doc_ids: Optional[Sequence[int]]) -> List[str]:
+        """The identifier itself, plus the identifiers extending it when asked ("K3.5" → "K3.5C1")."""
+        if not include_children:
+            return [key]
+        where, params = self._scope(doc_ids)
+        rows = self.conn.execute(
+            f"SELECT DISTINCT o.key FROM identifier_occurrences o WHERE o.key LIKE ? {where}",
+            [key.replace("%", "").replace("_", "") + "%", *params],
+        ).fetchall()
+        return [key] + [r[0] for r in rows if r[0] != key and parent_key(r[0], {key}) == key]
+
+    def identifier_search(
+        self,
+        text: str,
+        include_children: bool = False,
+        doc_ids: Optional[Sequence[int]] = None,
+        kinds: Optional[Sequence[str]] = None,
+        provisions: Optional[Sequence[str]] = None,
+    ) -> List[IdentifierHit]:
+        """
+        Every passage containing the identifier (case, spaces and hyphens ignored), grouped by role:
+        headings and captions first, then table rows, rules, and other mentions.
+        """
+        keys = self._matching_keys(identifier_key(text), include_children, doc_ids)
+        where, params = self._scope(doc_ids, kinds, provisions)
+        rows = self.conn.execute(
+            f"""
+            SELECT o.role, o.row, o.value, b.*, d.title AS doc_title
+            FROM identifier_occurrences o
+            JOIN blocks b ON b.id = o.block_id
+            JOIN documents d ON d.id = o.doc_id
+            WHERE o.key IN ({', '.join('?' * len(keys))}) {where}
+            ORDER BY d.title COLLATE NOCASE, b.seq
+            """,
+            [*keys, *params],
+        ).fetchall()
+
+        hits: Dict[int, dict] = {}
+        for row in rows:
+            hit = hits.setdefault(row["id"], {"block": _row_to_block(row), "doc_title": row["doc_title"],
+                                              "roles": set(), "rows": set(), "values": set()})
+            hit["roles"].add(row["role"])
+            hit["values"].add(row["value"])
+            if row["row"] is not None:
+                hit["rows"].add(row["row"])
+
+        results = [
+            IdentifierHit(block=h["block"], doc_title=h["doc_title"], group=_identifier_group(h["block"], h["roles"], h["values"]),
+                          values=tuple(sorted(h["values"], key=len, reverse=True)), rows=tuple(sorted(h["rows"])))
+            for h in hits.values()
+        ]
+        return sorted(results, key=lambda r: IDENTIFIER_GROUPS.index(r.group))  # Stable: keeps document order
+
+    def related_identifiers(self, text: str, include_children: bool = False,
+                            doc_ids: Optional[Sequence[int]] = None) -> RelatedIdentifiers:
+        """
+        Identifiers connected to this one: its parent and sub-identifiers, and those appearing in
+        the same table row (strongest) or the same passage. Only switched-on families are used.
+        """
+        key = identifier_key(text)
+        keys = self._matching_keys(key, include_children, doc_ids)
+        where, params = self._scope(doc_ids, alias="o1")
+        enabled = ("JOIN identifier_families f ON f.doc_id = o2.doc_id AND f.family = o2.family "
+                   "AND COALESCE(f.user_enabled, f.auto_enabled) = 1")
+        rows = self.conn.execute(
+            f"""
+            SELECT o2.key, o2.value,
+                   SUM(CASE WHEN o1.row IS NOT NULL AND o2.row = o1.row THEN 1 ELSE 0 END) AS same_row,
+                   SUM(CASE WHEN o1.row IS NULL AND o2.row IS NULL THEN 1 ELSE 0 END) AS same_passage
+            FROM identifier_occurrences o1
+            JOIN identifier_occurrences o2 ON o2.block_id = o1.block_id AND o2.key != o1.key
+            {enabled}
+            WHERE o1.key IN ({', '.join('?' * len(keys))}) {where}
+            GROUP BY o2.key, o2.value
+            """,
+            [*keys, *params],
+        ).fetchall()
+
+        scores: Dict[str, dict] = {}
+        for row in rows:
+            if row["key"] in keys:
+                continue
+            entry = scores.setdefault(row["key"], {"values": Counter(), "same_row": 0, "same_passage": 0})
+            entry["values"][row["value"]] += row["same_row"] + row["same_passage"]
+            entry["same_row"] += row["same_row"]
+            entry["same_passage"] += row["same_passage"]
+        related = sorted(
+            (RelatedIdentifier(key=k, value=e["values"].most_common(1)[0][0], same_row=e["same_row"],
+                               same_passage=e["same_passage"])
+             for k, e in scores.items() if e["same_row"] or e["same_passage"]),
+            key=lambda r: (-(r.same_row * config.SAME_ROW_WEIGHT + r.same_passage), r.value),
+        )[:config.RELATED_IDENTIFIERS]
+
+        known = self._known_keys(doc_ids)
+        parent = parent_key(key, known)
+        children = sorted(k for k in known if k != key and parent_key(k, known) == key)
+        return RelatedIdentifiers(
+            parent=self._display_value(parent) if parent else None,
+            children=tuple(self._display_value(k) for k in children),
+            related=tuple(related),
+        )
+
+    def _known_keys(self, doc_ids: Optional[Sequence[int]]) -> set:
+        """Identifier keys of switched-on families (the vocabulary for parents and suggestions)."""
+        where, params = self._scope(doc_ids)
+        rows = self.conn.execute(
+            "SELECT DISTINCT o.key FROM identifier_occurrences o JOIN identifier_families f "
+            "ON f.doc_id = o.doc_id AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1 "
+            f"WHERE 1 = 1 {where}",
+            params,
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def _display_value(self, key: str) -> str:
+        row = self.conn.execute(
+            "SELECT value FROM identifier_occurrences WHERE key = ? GROUP BY value ORDER BY COUNT(*) DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        return row[0] if row else key
+
+    def identifier_suggestions(self, text: str, doc_ids: Optional[Sequence[int]] = None,
+                               limit: int = config.IDENTIFIER_SUGGESTIONS) -> List[str]:
+        """Known identifiers starting with (or else containing) what was typed, most used first."""
+        key = identifier_key(text).replace("%", "").replace("_", "")
+        if not key:
+            return []
+        where, params = self._scope(doc_ids)
+        enabled = ("JOIN identifier_families f ON f.doc_id = o.doc_id AND f.family = o.family "
+                   "AND COALESCE(f.user_enabled, f.auto_enabled) = 1")
+        for pattern in (key + "%", "%" + key + "%"):
+            rows = self.conn.execute(
+                f"SELECT o.key, COUNT(*) AS uses FROM identifier_occurrences o {enabled} "
+                f"WHERE o.key LIKE ? AND o.key != ? {where} GROUP BY o.key ORDER BY uses DESC LIMIT ?",
+                [pattern, key, *params, limit],
+            ).fetchall()
+            if rows:
+                return [self._display_value(r[0]) for r in rows]
+        return []
+
+    def identifier_pages(self, doc_id: int, text: str, include_children: bool = False) -> List[int]:
+        keys = self._matching_keys(identifier_key(text), include_children, [doc_id])
+        rows = self.conn.execute(
+            f"SELECT DISTINCT b.page FROM identifier_occurrences o JOIN blocks b ON b.id = o.block_id "
+            f"WHERE o.doc_id = ? AND o.key IN ({', '.join('?' * len(keys))}) ORDER BY b.page",
+            [doc_id, *keys],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def identifier_values_on_page(self, doc_id: int, page: int, text: str,
+                                  include_children: bool = False) -> Dict[int, List[str]]:
+        """Block id → the identifier's written forms in that block, for highlighting."""
+        keys = self._matching_keys(identifier_key(text), include_children, [doc_id])
+        rows = self.conn.execute(
+            f"SELECT o.block_id, o.value FROM identifier_occurrences o JOIN blocks b ON b.id = o.block_id "
+            f"WHERE o.doc_id = ? AND b.page = ? AND o.key IN ({', '.join('?' * len(keys))})",
+            [doc_id, page, *keys],
+        ).fetchall()
+        found: Dict[int, List[str]] = {}
+        for row in rows:
+            found.setdefault(row[0], [])
+            if row[1] not in found[row[0]]:
+                found[row[0]].append(row[1])
+        return found
 
     # ---- Search ----------------------------------------------------------------------------
 
@@ -421,13 +684,19 @@ class Library:
             (doc_id, page),
         ).fetchall()
         seen, resolved = set(), []
+        identifier_families = self.enabled_families(doc_id)
         for row in rows:
             if (row["kind"], row["target"]) in seen:
                 continue
             seen.add((row["kind"], row["target"]))
             ref = self.resolve(doc_id, CrossRef(row["block_id"], row["kind"], row["target"]))
-            if ref.doc_id is not None or ref.ref.kind != "clause":
-                resolved.append(ref)
+            if ref.doc_id is None and ref.ref.kind == "clause":
+                continue
+            # "FLD 2041" looks like a document designation, but in a document where it's one of many
+            # values of an identifier family it's an identifier; show it only if it opens a document
+            if ref.doc_id is None and ref.ref.kind == "standard" and family_of(ref.ref.target) in identifier_families:
+                continue
+            resolved.append(ref)
         return resolved
 
     def resolve(self, doc_id: int, ref: CrossRef) -> ResolvedRef:
@@ -446,7 +715,7 @@ class Library:
         if row is None:
             return ResolvedRef(ref=ref, doc_id=None)
         block = _row_to_block(row)
-        return ResolvedRef(ref=ref, doc_id=doc_id, page=block.page, bbox=block.bbox)
+        return ResolvedRef(ref=ref, doc_id=doc_id, page=block.page, bbox=block.bbox, block_id=block.id)
 
     def _caption_block(self, doc_id: int, label: str) -> Optional[sqlite3.Row]:
         """Fallback for tables/figures that weren't detected as objects: their caption as plain text."""
@@ -463,8 +732,146 @@ class Library:
         for doc in self.list_documents():
             haystack = f"{doc.title} {doc.filename}".lower().replace("_", " ")
             if doc.id != doc_id and pattern.search(haystack):
-                return ResolvedRef(ref=ref, doc_id=doc.id, page=1, doc_title=doc.title)
+                first = self.conn.execute("SELECT id FROM blocks WHERE doc_id = ? ORDER BY seq LIMIT 1", (doc.id,)).fetchone()
+                return ResolvedRef(ref=ref, doc_id=doc.id, page=1, doc_title=doc.title, block_id=first[0] if first else None)
         return ResolvedRef(ref=ref, doc_id=None)
+
+    # ---- Related passages ------------------------------------------------------------------
+
+    def get_block(self, block_id: int) -> Optional[TextBlock]:
+        row = self.conn.execute("SELECT * FROM blocks WHERE id = ?", (block_id,)).fetchone()
+        return _row_to_block(row) if row else None
+
+    def related_passages(self, block: TextBlock, terms: Sequence[Term] = (),
+                         limit: int = config.RELATED_PER_GROUP) -> Dict[str, List[RelatedPassage]]:
+        """
+        Passages connected to `block`, by group (see RELATED_GROUPS), each with the reason. A passage
+        appears once, in the first group that finds it. `terms` are the defined terms `block` uses.
+        """
+        seen = {block.id}
+        titles = {d.id: d.title for d in self.list_documents()}
+        groups: Dict[str, List[RelatedPassage]] = {}
+
+        def add(group: str, candidates: Iterable[Tuple[int, str]]) -> None:
+            found = []
+            for block_id, reason in candidates:
+                if block_id in seen or len(found) >= limit:
+                    continue
+                other = self.get_block(block_id)
+                if other:
+                    seen.add(block_id)
+                    found.append(RelatedPassage(other, titles.get(other.doc_id, ""), reason))
+            if found:
+                groups[group] = found
+
+        add("references", self._outgoing_links(block))
+        add("referenced_by", self._incoming_links(block))
+        add("identifiers", self._shared_identifiers(block))
+        add("terms", self._shared_terms(block, terms))
+        add("similar", self._similar_wording(block))
+        return groups
+
+    def _outgoing_links(self, block: TextBlock) -> List[Tuple[int, str]]:
+        identifier_families = self.enabled_families(block.doc_id)
+        links = []
+        for row in self.conn.execute("SELECT kind, target FROM xrefs WHERE block_id = ? ORDER BY id", (block.id,)):
+            ref = self.resolve(block.doc_id, CrossRef(block.id, row["kind"], row["target"]))
+            if ref.block_id is None:
+                continue  # Not in the library, or a dotted number that isn't a clause
+            if ref.ref.kind == "standard" and family_of(ref.ref.target) in identifier_families:
+                continue
+            name = f"Clause {ref.ref.target}" if ref.ref.kind == "clause" else ref.ref.target
+            links.append((ref.block_id, f"References {name}"))
+        return links
+
+    def _incoming_links(self, block: TextBlock) -> List[Tuple[int, str]]:
+        """Passages referring to this passage's table/figure, or to the clause it heads."""
+        targets = set()
+        if block.is_object and block.label:
+            targets.add((block.kind, block.label))
+        heads_clause = block.kind == "heading" or (block.clause_num and block.text.startswith(block.clause_num))
+        if heads_clause and block.clause_num:
+            targets.add(("clause", block.clause_num))
+            if block.clause_num.startswith(("Annex", "Appendix")):
+                targets.add(("annex", block.clause_num))
+        if not targets:
+            return []
+        condition = " OR ".join("(x.kind = ? AND x.target = ?)" for _ in targets)
+        rows = self.conn.execute(
+            f"SELECT x.block_id, x.kind, x.target FROM xrefs x WHERE x.doc_id = ? AND x.block_id != ? AND ({condition}) "
+            f"ORDER BY x.block_id",
+            [block.doc_id, block.id, *[v for pair in sorted(targets) for v in pair]],
+        ).fetchall()
+        return [(r["block_id"], f"Refers to {'Clause ' + r['target'] if r['kind'] == 'clause' else r['target']}")
+                for r in rows]
+
+    def _shared_identifiers(self, block: TextBlock) -> List[Tuple[int, str]]:
+        """Other passages with this passage's identifiers; rarer shared identifiers count for more."""
+        keys = [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT o.key FROM identifier_occurrences o JOIN identifier_families f ON f.doc_id = o.doc_id "
+            "AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1 WHERE o.block_id = ?",
+            (block.id,),
+        )]
+        if not keys:
+            return []
+        marks = ", ".join("?" * len(keys))
+        spread = dict(self.conn.execute(
+            f"SELECT key, COUNT(DISTINCT block_id) FROM identifier_occurrences WHERE key IN ({marks}) GROUP BY key", keys
+        ).fetchall())
+        shared: Dict[int, set] = {}
+        for row in self.conn.execute(
+            f"SELECT DISTINCT block_id, key FROM identifier_occurrences WHERE key IN ({marks}) AND block_id != ?",
+            [*keys, block.id],
+        ):
+            shared.setdefault(row[0], set()).add(row[1])
+        scored = sorted(shared.items(), key=lambda kv: -sum(1 / math.log(1 + spread[k]) for k in kv[1]))
+        return [(block_id, "Shares " + ", ".join(self._display_value(k) for k in sorted(found)[:3])
+                 + (f" and {len(found) - 3} more" if len(found) > 3 else ""))
+                for block_id, found in scored]
+
+    def _shared_terms(self, block: TextBlock, terms: Sequence[Term]) -> List[Tuple[int, str]]:
+        """The definitions of the terms this passage uses, then other passages using the same terms."""
+        links, using = [], {}
+        for term in terms:
+            row = self.conn.execute(
+                "SELECT id FROM blocks WHERE doc_id = ? AND clause_num = ? ORDER BY (kind = 'heading') DESC, seq LIMIT 1",
+                (term.doc_id, term.clause_num),
+            ).fetchone()
+            if row:
+                links.append((row[0], f"Defines “{term.term}”"))
+            fts_query = build_fts_query(" OR ".join(f'"{name}"' for name in term.names))
+            if not fts_query:
+                continue
+            for other in self.conn.execute(
+                "SELECT b.id FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+                "WHERE blocks_fts MATCH ? AND b.doc_id = ? AND b.id != ? ORDER BY bm25(blocks_fts) LIMIT 50",
+                (fts_query, block.doc_id, block.id),
+            ):
+                using.setdefault(other[0], []).append(term.term)
+        for block_id, names in sorted(using.items(), key=lambda kv: -len(kv[1])):
+            links.append((block_id, "Uses " + ", ".join(f"“{n}”" for n in names[:3])))
+        return links
+
+    def _similar_wording(self, block: TextBlock) -> List[Tuple[int, str]]:
+        """
+        "More like this" with the full-text index: the passage's distinctive words as an OR query,
+        ranked by BM25 (rarer shared words count for more). Needs a few shared words to count.
+        """
+        words = [w for w in dict.fromkeys(re.findall(r"[a-z][a-z-]{3,}", block.text.lower())) if w not in _COMMON_WORDS]
+        words = sorted(words, key=len, reverse=True)[:config.SIMILAR_QUERY_WORDS]
+        fts_query = build_fts_query(" OR ".join(f'"{w}"' for w in words)) if words else None
+        if not fts_query:
+            return []
+        links = []
+        for row in self.conn.execute(
+            "SELECT b.id, highlight(blocks_fts, 0, ?, ?) AS marked FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+            "WHERE blocks_fts MATCH ? AND b.id != ? AND b.kind != 'heading' ORDER BY bm25(blocks_fts) LIMIT 40",
+            (_HIT_START, _HIT_END, fts_query, block.id),
+        ):
+            shared = list(dict.fromkeys(m.lower() for m in _MARKED_SPAN.findall(row["marked"])))
+            if len(shared) >= config.SIMILAR_MIN_SHARED_WORDS:
+                links.append((row["id"], "Similar wording: " + ", ".join(shared[:4])))
+        return links
 
     def referenced_from(self, doc_id: int, page: int) -> List[Tuple[CrossRef, TextBlock]]:
         """
@@ -485,6 +892,48 @@ class Library:
             [doc_id, page, *[v for pair in sorted(targets) for v in pair]],
         ).fetchall()
         return [(CrossRef(row["id"], row["ref_kind"], row["target"]), _row_to_block(row)) for row in rows]
+
+
+# Groups of related passages, in display (and priority) order
+RELATED_GROUPS = {
+    "references": "References",
+    "referenced_by": "Referenced by",
+    "identifiers": "Shares identifiers",
+    "terms": "Defined terms",
+    "similar": "Similar wording",
+}
+# Too common in standards to make two passages "similar"
+_COMMON_WORDS = set("""
+shall should must will would could that this these those with from have been into such than then them they their
+there where when which while also each other only same more most less least many much some used using uses based
+within without between including include includes following given specified accordance according requirements
+requirement document documents standard standards clause clauses table tables figure figures annex appendix section
+paragraph note notes example examples see apply applies applicable general specific provided shown described
+""".split())
+
+
+# Display order of identifier results: where it's defined, table rows, rules, then other mentions
+IDENTIFIER_GROUPS = ["defined", "table", "rule", "mention"]
+IDENTIFIER_GROUP_TITLES = {
+    "defined": "Headings and captions",
+    "table": "Table rows",
+    "rule": "Rules (shall / should / may)",
+    "mention": "Other mentions",
+}
+
+
+def _identifier_group(block: TextBlock, roles: set, values: Sequence[str]) -> str:
+    if roles & {"heading", "caption"}:
+        return "defined"
+    # A run-in heading ("4.2 Message K3.5. The K3.5 message…") names its subject in the clause title
+    if (block.clause_num and block.text.startswith(block.clause_num)
+            and any(value in block.clause_title for value in values)):
+        return "defined"
+    if "table" in roles:
+        return "table"
+    if block.provision in (REQUIREMENT, RECOMMENDATION, PERMISSION):
+        return "rule"
+    return "mention"
 
 
 def _row_to_block(row: sqlite3.Row) -> TextBlock:

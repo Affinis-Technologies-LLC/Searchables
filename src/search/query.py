@@ -60,3 +60,18 @@ def build_fts_query(raw: str) -> Optional[str]:
     if negatives:
         query = f"({query}) NOT ({' OR '.join(negatives)})"
     return query
+
+IDENTIFIER_HELP = """
+With **Identifier** on, the search box takes one identifier, such as a message label, field number,
+requirement ID or part number.
+
+| You type | Finds |
+|---|---|
+| `K3.5`, `k 3.5`, `k-3.5` | the same identifier: case, spaces and hyphens are ignored |
+| `K3.5` + *Include sub-identifiers* | also identifiers extending it (`K3.5C1`, `K3.5I`…) |
+| part of an identifier | suggestions for identifiers that start with or contain it |
+
+Results are grouped: **headings and captions** (where it's introduced), **table rows**, **rules**
+(shall / should / may), then **other mentions**. Click a related identifier to follow it; **Back**
+retraces your steps. Patterns are discovered per document: see Library → Manage → Identifiers.
+"""
