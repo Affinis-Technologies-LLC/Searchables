@@ -8,6 +8,7 @@ and a family counts as identifiers when it has several distinct values reused ac
 Measurements, ordinals, clause numbers and structural labels ("Table 12") are never candidates.
 """
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -21,6 +22,10 @@ _MIXED_TOKEN = re.compile(
 # A short upper-case label, a space, then a number: FLD 2041
 _LABELLED_NUMBER = re.compile(r"(?<![\w.-])([A-Z]{2,6}) (\d{2,6})(?![\w.-])")
 
+# Dot and dash look-alikes that NFKC leaves alone
+_DOTS = re.compile(r"[\u2027\u00B7\u2219\u22C5\u30FB\uFF0E]")
+_DASHES = re.compile(r"[\u2010\u2011\u2012\u2013\u2212]")
+
 # Words that label document structure, not identifiers ("TABLE 12", "PAGE 40")
 _STRUCTURAL = {"TABLE", "TABLES", "FIGURE", "FIGURES", "PAGE", "PAGES", "SECTION", "PARAGRAPH", "PARA",
                "CLAUSE", "ANNEX", "APPENDIX", "NOTE", "NOTES", "EXAMPLE", "STEP", "ITEM", "VOLUME", "PART",
@@ -31,9 +36,19 @@ _MEASUREMENT = re.compile(r"^\d+(?:\.\d+)?[A-Za-z]{1,3}$")
 _APPENDIX_CLAUSE = re.compile(r"^[A-Z]\.\d+(?:\.\d+)*$")
 
 
+def normalize_text(text: str) -> str:
+    """
+    Look-alike characters to plain ones: full-width letters and digits, "one dot leader" and other
+    dot variants, non-breaking and thin spaces (NFKC), and the various dashes to "-". PDFs use these
+    freely, and an identifier written with them would otherwise not match.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    return _DASHES.sub("-", _DOTS.sub(".", text))
+
+
 def identifier_key(value: str) -> str:
     """Matching form: case, spaces, hyphens and underscores ignored ("fld-2041" = "FLD 2041")."""
-    return re.sub(r"[\s_-]+", "", value.upper())
+    return re.sub(r"[\s_-]+", "", normalize_text(value).upper())
 
 
 def family_of(value: str) -> str:
@@ -43,6 +58,7 @@ def family_of(value: str) -> str:
 
 def find_candidates(text: str) -> List[str]:
     """Identifier-like tokens in text, in order of appearance (duplicates kept)."""
+    text = normalize_text(text)
     found = []
     for match in _MIXED_TOKEN.finditer(text):
         value = match.group(0)

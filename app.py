@@ -471,6 +471,10 @@ if search_tab.open:
                 results = None
             elif id_mode:
                 results, groups = run_identifier_search(query, include_children)
+                outdated = [d for d in library.outdated_documents() if not selected_docs or d in selected_docs]
+                if outdated:
+                    st.info(f"{len(outdated)} document(s) in scope were indexed by an older version and may miss "
+                            "identifiers. Re-index them in the Library tab.", icon=":material/update:")
                 if not results:
                     st.warning(f"No passages contain the identifier “{query.strip()}” in the current scope.")
                     suggestions = library.identifier_suggestions(query, doc_ids=[d.id for d in selected_docs])

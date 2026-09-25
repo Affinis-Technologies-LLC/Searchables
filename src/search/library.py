@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src import config
-from src.extractor.identifiers import family_of, identifier_key, parent_key, summarize_families
+from src.extractor.identifiers import family_of, identifier_key, normalize_text, parent_key, summarize_families
 from src.extractor.objects import parse_caption, standard_pattern
 from src.extractor.pdf import PDFExtractor
 from src.research.assess import assess
@@ -478,7 +478,40 @@ class Library:
                           values=tuple(sorted(h["values"], key=len, reverse=True)), rows=tuple(sorted(h["rows"])))
             for h in hits.values()
         ]
+        if not results:
+            results = self._identifier_text_matches(text, include_children, doc_ids, kinds, provisions)
         return sorted(results, key=lambda r: IDENTIFIER_GROUPS.index(r.group))  # Stable: keeps document order
+
+    def _identifier_text_matches(self, text: str, include_children: bool, doc_ids, kinds, provisions) -> List[IdentifierHit]:
+        """
+        The code found in the text itself, when it isn't among the discovered identifiers: its pattern
+        is switched off, the document predates identifier discovery, or the PDF writes it oddly
+        ("J2 .0", "J2·0"). Any punctuation or spacing is allowed between its letter and digit groups.
+        """
+        parts = re.findall(r"[A-Za-z]+|\d+", normalize_text(text))
+        if not parts:
+            return []
+        gap = r"[\W_]{0,3}"
+        # Sub-identifiers extend it by letters, or by separated numbers ("K2.2C1", "K2.2.4" but not "K2.22")
+        tail = r"(?:[._-]?[A-Za-z][A-Za-z0-9]*|[._-]\d+)*" if include_children else ""
+        # Not part of a longer code: "K2" isn't found inside "K2.2"
+        pattern = re.compile(r"(?<![A-Za-z0-9])(?<![A-Za-z0-9][._-])" + gap.join(map(re.escape, parts)) + tail
+                             + r"(?![A-Za-z0-9])(?![._-][A-Za-z0-9])", re.IGNORECASE)
+        # Full-text tokens split codes unpredictably ("K2.2" is "k2" + "2"), so filter on each part instead
+        where, params = self._scope(doc_ids, kinds, provisions, alias="b")
+        where += " AND b.text LIKE ?" * len(parts)
+        params.extend(f"%{part}%" for part in parts)
+        rows = self.conn.execute(
+            f"SELECT b.*, d.title AS doc_title FROM blocks b JOIN documents d ON d.id = b.doc_id "
+            f"WHERE 1 = 1 {where} ORDER BY d.title COLLATE NOCASE, b.seq",
+            params,
+        ).fetchall()
+        hits = []
+        for row in rows:
+            found = tuple(dict.fromkeys(m.group(0) for m in pattern.finditer(row["text"])))
+            if found:
+                hits.append(IdentifierHit(block=_row_to_block(row), doc_title=row["doc_title"], group="text", values=found))
+        return hits
 
     def related_identifiers(self, text: str, include_children: bool = False,
                             doc_ids: Optional[Sequence[int]] = None) -> RelatedIdentifiers:
@@ -573,7 +606,15 @@ class Library:
             f"WHERE o.doc_id = ? AND o.key IN ({', '.join('?' * len(keys))}) ORDER BY b.page",
             [doc_id, *keys],
         ).fetchall()
+        if not rows:  # Not a discovered identifier: the pages where the code appears in the text
+            return sorted({hit.block.page for hit in self._identifier_text_matches(text, include_children, [doc_id], None, None)})
         return [r[0] for r in rows]
+
+    def _has_occurrences(self, doc_id: int, keys: Sequence[str]) -> bool:
+        return self.conn.execute(
+            f"SELECT 1 FROM identifier_occurrences WHERE doc_id = ? AND key IN ({', '.join('?' * len(keys))}) LIMIT 1",
+            [doc_id, *keys],
+        ).fetchone() is not None
 
     def identifier_values_on_page(self, doc_id: int, page: int, text: str,
                                   include_children: bool = False) -> Dict[int, List[str]]:
@@ -584,6 +625,10 @@ class Library:
             f"WHERE o.doc_id = ? AND b.page = ? AND o.key IN ({', '.join('?' * len(keys))})",
             [doc_id, page, *keys],
         ).fetchall()
+        if not rows and not self._has_occurrences(doc_id, keys):
+            return {hit.block.id: list(hit.values)
+                    for hit in self._identifier_text_matches(text, include_children, [doc_id], None, None)
+                    if hit.block.page == page}
         found: Dict[int, List[str]] = {}
         for row in rows:
             found.setdefault(row[0], [])
@@ -1148,12 +1193,13 @@ paragraph note notes example examples see apply applies applicable general speci
 
 
 # Display order of identifier results: where it's defined, table rows, rules, then other mentions
-IDENTIFIER_GROUPS = ["defined", "table", "rule", "mention"]
+IDENTIFIER_GROUPS = ["defined", "table", "rule", "mention", "text"]
 IDENTIFIER_GROUP_TITLES = {
     "defined": "Headings and captions",
     "table": "Table rows",
     "rule": "Rules (shall / should / may)",
     "mention": "Other mentions",
+    "text": "Found in the text (not a discovered identifier)",
 }
 
 
