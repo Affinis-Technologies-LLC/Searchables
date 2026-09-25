@@ -5,10 +5,17 @@ pdf_query_engine/
 ├── requirements.txt
 ├── data/                       # Library: stored PDFs + SQLite index & collections (git-ignored)
 ├── deploy/
+│   ├── macos/
+│   │   ├── run.sh                  # Run in a terminal (sets up .venv on first use)
+│   │   ├── install-service.sh      # Background service (launchd LaunchAgent): starts at login
+│   │   ├── uninstall-service.sh    # Removes the service; keeps the library
+│   │   ├── common.sh               # Shared helpers: Python 3.10+ lookup, .venv, Tesseract
+│   │   └── README.md               # macOS setup, security and troubleshooting
 │   └── windows/
+│       ├── run.ps1                 # Run in a PowerShell window (sets up .venv on first use)
 │       ├── install-service.ps1     # Installs/updates the Windows service (WinSW), venv, data folder
 │       ├── uninstall-service.ps1   # Removes the service; keeps the library unless -RemoveData
-│       └── README.md               # Windows service setup, security and troubleshooting
+│       └── README.md               # Windows setup, service, security and troubleshooting
 ├── src/
 │   ├── __init__.py
 │   ├── config.py               # Constants, thresholds, and paths

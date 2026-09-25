@@ -4,6 +4,21 @@ The scripts in this folder install Searchables as a Windows service that starts 
 restarts itself if it crashes, and writes rotating logs. They use [WinSW](https://github.com/winsw/winsw),
 a small open-source service wrapper, to run Streamlit.
 
+## Just want to try it?
+
+`run.ps1` starts the app in a PowerShell window without installing a service (Ctrl+C stops it). It sets
+up `.venv` on first use and keeps the library in the project's `data` folder:
+
+```powershell
+cd C:\Apps\Searchables\deploy\windows
+Set-ExecutionPolicy -Scope Process Bypass
+.\run.ps1                # http://127.0.0.1:8501
+.\run.ps1 -Port 8600
+```
+
+The rest of this page covers the Windows service, which starts with the machine. Note that the
+service keeps its library in `C:\ProgramData\Searchables`, separate from the one `run.ps1` uses.
+
 ## Before you start
 
 - **Windows 10/11 or Windows Server 2019+**, and an account with administrator rights.
