@@ -3,7 +3,7 @@
     Starts Searchables in this PowerShell window (no Windows service). Stop it with Ctrl+C.
 
 .DESCRIPTION
-    Sets up .venv and installs requirements.txt on first use, and again whenever requirements.txt
+    Sets up .venv and installs requirements.lock on first use, and again whenever requirements.lock
     changes. The library is kept in the project's data folder, as when the app is run by hand.
     For a service that starts with Windows, use install-service.ps1 instead.
 
@@ -44,16 +44,17 @@ if ([version]$PyVersion -lt [version]"3.10") {
     throw "The .venv uses Python $PyVersion; Searchables needs 3.10 or newer. Delete the .venv folder and run this again."
 }
 
-# Reinstall only when requirements.txt changes: installing is slow (PyTorch via sentence-transformers)
-$Requirements = Join-Path $AppDir "requirements.txt"
+# Reinstall only when requirements.lock changes: installing is slow (PyTorch via sentence-transformers).
+# The lock file pins every package to an exact version and hash; pip refuses anything else.
+$Requirements = Join-Path $AppDir "requirements.lock"
 $Stamp = Join-Path $AppDir ".venv\.requirements.sha256"
 $Current = (Get-FileHash $Requirements -Algorithm SHA256).Hash
 if (-not (Test-Path $Stamp) -or (Get-Content $Stamp -Raw).Trim() -ne $Current) {
     Write-Step "Installing Python packages (the first run can take several minutes)"
     & $VenvPython -m pip install --upgrade pip --quiet
     if ($LASTEXITCODE -ne 0) { throw "Upgrading pip failed." }
-    & $VenvPython -m pip install -r $Requirements --quiet
-    if ($LASTEXITCODE -ne 0) { throw "Installing requirements.txt failed." }
+    & $VenvPython -m pip install --require-hashes -r $Requirements --quiet
+    if ($LASTEXITCODE -ne 0) { throw "Installing requirements.lock failed." }
     Set-Content -Path $Stamp -Value $Current
 }
 
@@ -80,4 +81,4 @@ if (-not $env:TESSDATA_PREFIX) {
 
 Set-Location $AppDir
 Write-Step "Starting Searchables on http://127.0.0.1:$Port (Ctrl+C to stop)"
-& $VenvPython -m streamlit run app.py --server.port $Port --server.address 127.0.0.1 --browser.gatherUsageStats false
+& $VenvPython -m src.server --port $Port --address 127.0.0.1

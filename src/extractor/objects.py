@@ -31,10 +31,10 @@ _ANNEX_REF = re.compile(
 # word; resolution later also requires the clause to exist in the document.
 # (?!\.?\d) ends the number without rejecting a sentence-final full stop ("see 4.2.")
 _CLAUSE_WORD_REF = re.compile(
-    r"\b(?i:(?:sub)?(?:clauses?|paragraphs?|paras?\.?|sections?))\s+(\d{1,2}(?:\.\d{1,3}){0,5})(?!\.?\d)"
+    r"\b(?i:(?:sub)?(?:clauses?|paragraphs?|paras?\.?|sections?))\s+(\d{1,2}(?:\.\d{1,3}){0,9})(?!\.?\d)"
 )
 _CLAUSE_LEADIN_REF = re.compile(
-    r"\b(?:see|in|of|to|under|per|with|from|and|according to|specified in|given in)\s+(\d{1,2}(?:\.\d{1,3}){1,5})(?!\.?\d)"
+    r"\b(?:see|in|of|to|under|per|with|from|and|according to|specified in|given in)\s+(\d{1,2}(?:\.\d{1,3}){1,9})(?!\.?\d)"
 )
 # Document designations in general form rather than a list of issuing bodies: upper-case prefix
 # words ("ISO", "ISO/IEC", "EN ISO", "MIL-STD", "STANAG") then a number of 2+ digits, with optional

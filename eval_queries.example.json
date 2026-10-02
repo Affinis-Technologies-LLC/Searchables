@@ -1,0 +1,14 @@
+[
+  {
+    "query": "how long must calibration records be kept",
+    "expect": [{"document": "ISO 9001", "clause": "7.1.5", "text": "retain"}]
+  },
+  {
+    "query": "\"shall not exceed\" set pressure",
+    "expect": [{"document": "ISO 4126-1", "page": 12}]
+  },
+  {
+    "query": "track number reporting responsibility",
+    "expect": [{"clause": "4.3.2"}, {"text": "reporting responsibility for the track"}]
+  }
+]

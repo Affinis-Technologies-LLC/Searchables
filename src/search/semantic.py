@@ -12,7 +12,8 @@ for comparing two texts with each other.
 import os
 import re
 import threading
-from typing import Callable, List, Optional, Sequence
+import time
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -22,9 +23,12 @@ from src import config
 # Tesseract); the library then disables them itself with a warning. Decide it up front instead: nearly
 # all the time is spent in the model, not in splitting text into tokens.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 _load_lock = threading.Lock()
 _encode_lock = threading.Lock()  # One encoding at a time: the indexer and a search can share the model
+_waiting = 0                     # Searches waiting for the model: indexing lets them go first between steps
+_waiting_lock = threading.Lock()
 _model = None
 
 ProgressCallback = Callable[[int, int], None]
@@ -41,6 +45,9 @@ def get_model():
     global _model
     with _load_lock:
         if _model is None:
+            if model_files_present():
+                # Read when the Hugging Face libraries are first imported: nothing may contact the internet
+                os.environ["HF_HUB_OFFLINE"] = "1"
             from sentence_transformers import SentenceTransformer  # Heavy import: only when needed
             config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
             _model = SentenceTransformer(
@@ -53,20 +60,32 @@ def get_model():
         return _model
 
 
-def _encode(texts: Sequence[str]) -> np.ndarray:
-    with _encode_lock:
-        vectors = get_model().encode(list(texts), batch_size=config.EMBEDDING_BATCH,
-                                     normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+def _encode(texts: Sequence[str], waited_for: bool = False) -> np.ndarray:
+    """`waited_for`: someone is waiting on the result (a search, a page view), so indexing gives way."""
+    global _waiting
+    if waited_for:
+        with _waiting_lock:
+            _waiting += 1
+    try:
+        with _encode_lock:
+            vectors = get_model().encode(list(texts), batch_size=config.EMBEDDING_BATCH, normalize_embeddings=True,
+                                         convert_to_numpy=True, show_progress_bar=False)
+    finally:
+        if waited_for:
+            with _waiting_lock:
+                _waiting -= 1
     return vectors.astype(np.float32)
 
 
 def embed_passages(texts: Sequence[str], on_progress: Optional[ProgressCallback] = None) -> np.ndarray:
-    """Vectors for passages to be searched, in batches so progress can be reported and searches interleave."""
+    """Vectors for passages to be searched, a few at a time so progress can be reported and searches interleave."""
     if not texts:
         return np.zeros((0, config.EMBEDDING_DIMENSIONS), dtype=np.float32)
     parts: List[np.ndarray] = []
-    step = config.EMBEDDING_BATCH * 4
+    step = config.EMBEDDING_BATCH
     for start in range(0, len(texts), step):
+        while _waiting:  # A lock alone isn't enough: this thread would usually take it straight back
+            time.sleep(0.01)
         parts.append(_encode(["passage: " + t for t in texts[start:start + step]]))
         if on_progress:
             on_progress(min(start + step, len(texts)), len(texts))
@@ -74,19 +93,42 @@ def embed_passages(texts: Sequence[str], on_progress: Optional[ProgressCallback]
 
 
 def embed_query(text: str) -> np.ndarray:
-    return _encode(["query: " + text])[0]
+    return _encode(["query: " + text], waited_for=True)[0]
 
 
 def embed_for_comparison(texts: Sequence[str]) -> np.ndarray:
     """Vectors for comparing texts with each other (symmetric), e.g. sentence against sentence."""
     if not texts:
         return np.zeros((0, config.EMBEDDING_DIMENSIONS), dtype=np.float32)
-    return _encode(["query: " + t for t in texts])
+    return _encode(["query: " + t for t in texts], waited_for=True)
 
 
 def passage_text(clause_title: str, text: str) -> str:
     """What gets embedded for a passage: its clause title gives short passages their context."""
     return f"{clause_title}. {text}" if clause_title and not text.startswith(clause_title) else text
+
+
+def table_chunks(caption: str, columns: Sequence[str], rows: Sequence[Sequence[str]]) -> List[Tuple[int, int, str]]:
+    """
+    A long table as runs of rows that each fit what the model reads at once: (first row, last row,
+    text), rows numbered from 1. Every run repeats the caption and header row, so a row deep in the
+    table is still read with what its columns mean. A table that fits in one run returns nothing:
+    the vector of the table's own passage covers it.
+    """
+    header = " | ".join(columns)
+    prefix = f"{caption}. {header}" if caption else header
+    lines = [" | ".join(row) for row in rows]
+    if len(prefix) + sum(len(line) + 1 for line in lines) <= config.EMBEDDING_TABLE_CHARS:
+        return []
+    budget = max(config.EMBEDDING_TABLE_CHARS - len(prefix), config.EMBEDDING_TABLE_CHARS // 4)
+    chunks, start, size = [], 0, 0
+    for i, line in enumerate(lines):
+        if i > start and size + len(line) > budget:
+            chunks.append((start + 1, i, "\n".join([prefix, *lines[start:i]])))
+            start, size = i, 0
+        size += len(line) + 1
+    chunks.append((start + 1, len(lines), "\n".join([prefix, *lines[start:]])))
+    return chunks
 
 
 _sentence_cache: dict = {}

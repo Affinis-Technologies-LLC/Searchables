@@ -1,0 +1,4 @@
+{
+  // Aliases
+  "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"], }, },
+}

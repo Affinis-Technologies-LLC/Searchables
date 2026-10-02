@@ -64,8 +64,9 @@ def render_collections(library: Library, store: CollectionStore, collection: Col
 def _pin_card(store: CollectionStore, pin: Pin, available: bool) -> None:
     with st.container(border=True):
         badge = f'<span class="badge badge-object">{html.escape(pin.label)}</span>' if pin.label else ""
+        where = "line" if pin.kind == "code" else "p."
         st.html(
-            f'<div class="result-head"><span class="badge badge-page">p. {html.escape(pin.page_label)}</span>'
+            f'<div class="result-head"><span class="badge badge-page">{where} {html.escape(pin.page_label)}</span>'
             f'{badge}<span class="result-doc">{html.escape(pin.doc_title)}</span></div>'
             f'<div class="result-path">{html.escape(pin.clause) or "&nbsp;"}</div>'
         )
@@ -73,6 +74,8 @@ def _pin_card(store: CollectionStore, pin: Pin, available: bool) -> None:
             if pin.table.get("caption"):
                 st.caption(pin.table["caption"])
             st.dataframe(pd.DataFrame(pin.table["rows"], columns=pin.table["columns"]), hide_index=True, width="stretch")
+        elif pin.kind == "code":
+            st.code(pin.text, language=None, wrap_lines=True)
         else:
             st.html(f'<div class="result-body pin-quote">{html.escape(pin.text)}</div>')
 
@@ -80,7 +83,9 @@ def _pin_card(store: CollectionStore, pin: Pin, available: bool) -> None:
                      on_change=_save_note, args=(store, pin.id), height=68, label_visibility="collapsed")
         with st.container(horizontal=True, vertical_alignment="center"):
             found = f"Found by “{pin.query}”" if pin.query else ""
-            if not available:
+            if pin.kind == "code":
+                found = "Source code: open it from the sidebar's Code tab"
+            elif not available:
                 found = "Document no longer in the library; text and citation kept"
             st.caption(found, width="stretch")
             st.button("View page", key=f"view_pin_{pin.id}", disabled=not available, on_click=_view_pin,

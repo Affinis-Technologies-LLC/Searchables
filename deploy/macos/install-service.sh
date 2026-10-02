@@ -8,7 +8,7 @@
 #
 # Options:
 #   --port N          Port to listen on (default 8501)
-#   --address ADDR    127.0.0.1 = this Mac only (default); 0.0.0.0 = other machines too (no login!)
+#   --address ADDR    127.0.0.1 = this Mac only (default); 0.0.0.0 = other machines too (password only, unencrypted)
 #   --data-dir DIR    Library location (default: the project's data folder, as when run by hand)
 #   --label NAME      launchd label (default com.searchables.app); use another to run a second copy
 #   --python PATH     Python 3.10+ used to create .venv
@@ -75,13 +75,9 @@ cat > "$PLIST" <<PLIST
     <key>ProgramArguments</key>
     <array>
         <string>$(xml_escape "$VENV_PYTHON")</string>
-        <string>-m</string><string>streamlit</string><string>run</string>
-        <string>$(xml_escape "$APP_DIR/app.py")</string>
-        <string>--server.port</string><string>$PORT</string>
-        <string>--server.address</string><string>$(xml_escape "$ADDRESS")</string>
-        <string>--server.headless</string><string>true</string>
-        <string>--server.fileWatcherType</string><string>none</string>
-        <string>--browser.gatherUsageStats</string><string>false</string>
+        <string>-m</string><string>src.server</string>
+        <string>--port</string><string>$PORT</string>
+        <string>--address</string><string>$(xml_escape "$ADDRESS")</string>
     </array>
     <key>WorkingDirectory</key><string>$(xml_escape "$APP_DIR")</string>
     <key>EnvironmentVariables</key>
@@ -117,11 +113,11 @@ launchctl kickstart "$DOMAIN/$LABEL"
 URL="http://127.0.0.1:$PORT"
 step "Waiting for the app to answer"
 for _ in $(seq 1 60); do
-    if curl -sf "$URL/_stcore/health" >/dev/null 2>&1; then
+    if curl -sf "$URL/api/session" >/dev/null 2>&1; then
         printf '\n\033[32mSearchables is running: %s\033[0m\n' "$URL"
         echo "If macOS shows a \"Background Items Added\" notification, keep it allowed so the service"
         echo "starts at login and restarts after a crash (System Settings → General → Login Items & Extensions)."
-        [ "$ADDRESS" = "127.0.0.1" ] || warn "The app is reachable from the network and has no login. Anyone who can reach port $PORT can read and delete documents."
+        [ "$ADDRESS" = "127.0.0.1" ] || warn "The app is reachable from the network. Only its password protects the library, and it travels unencrypted (plain HTTP) to anyone who can reach port $PORT."
         exit 0
     fi
     sleep 1

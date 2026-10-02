@@ -1,0 +1,5 @@
+# For running the tests: pip install -r requirements-dev.txt, then python -m pytest
+pytest>=8.0,<10
+httpx2>=2.0,<3          # Starlette's test client
+# Optional, for tests/test_browser.py (drives the app in your installed Chrome; skipped without it)
+playwright>=1.45,<2

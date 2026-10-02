@@ -4,8 +4,8 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
-from src.models import TableData, TextBlock
-from src.search.library import Library
+from src.models import TextBlock
+from src.search.library import Library, table_caption
 from src.utils.formatting import highlight_values
 
 
@@ -18,12 +18,6 @@ def unique_columns(names: List[str]) -> List[str]:
         seen[name] = seen.get(name, 0) + 1
         unique.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
     return unique
-
-
-def table_caption(block: TextBlock, part: TableData) -> str:
-    """The block's text is the caption followed by every cell; strip the cells to recover the caption."""
-    cells = " ".join(" ".join(row) for row in [part.columns, *part.rows])
-    return block.text[: -len(cells)].strip() if cells and block.text.endswith(cells) else ""
 
 
 def table_frame(library: Library, block: TextBlock) -> Tuple[pd.DataFrame, List[int]]:

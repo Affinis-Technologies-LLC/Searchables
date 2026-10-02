@@ -9,6 +9,20 @@ PDF_DIR = DATA_DIR / "pdfs"
 DB_PATH = DATA_DIR / "library.db"
 AUTH_FILE = DATA_DIR / "auth.json"  # Password hash; delete it to set a new password
 
+
+def make_private(folder: Path) -> None:
+    """
+    Creates a folder that only this account can open, so other accounts on the machine can't read the
+    stored PDFs past the app's password. No effect on Windows, where the install script sets the
+    folder's permissions instead.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(folder, 0o700)
+    except OSError:
+        pass
+
+
 # Meaning-based search: a local embedding model, downloaded once into MODEL_DIR (git-ignored) and
 # pinned to an exact revision. Microsoft E5 (MIT licence). Changing the model re-embeds the library.
 MODEL_DIR = Path(os.environ.get("SEARCHABLES_MODEL_DIR", PROJECT_ROOT / "models"))
@@ -17,8 +31,10 @@ EMBEDDING_REVISION = "f52bf8ec8c7124536f0efb74aca902b2995e5bcd"
 EMBEDDING_DIMENSIONS = 768
 EMBEDDING_ID = f"{EMBEDDING_MODEL}@{EMBEDDING_REVISION[:12]}"  # Stored per document to spot stale vectors
 EMBEDDING_DEVICE = "cpu"
-EMBEDDING_BATCH = 32
-EMBEDDING_MAX_CHARS = 2000        # Longer passages (mostly big tables) are cut; the model reads ~512 tokens anyway
+EMBEDDING_BATCH = 8               # Passages read per step while indexing; a search waits at most one step for the model
+EMBEDDING_COMMIT = 128            # Vectors are saved this often, so interrupted indexing resumes from here
+EMBEDDING_MAX_CHARS = 2000        # Longer passages are cut; the model reads ~512 tokens anyway
+EMBEDDING_TABLE_CHARS = 1200      # Longer tables also get a vector per run of rows this long (with caption and header)
 
 # Sign-in
 MIN_PASSWORD_LENGTH = 10
@@ -32,8 +48,9 @@ MAX_HEADING_CHARS = 120         # Longer lines are body text, never clause headi
 MAX_RUN_IN_TITLE_WORDS = 8      # "4.2.1 Transmit rules. The system…": longer "titles" are sentences
 
 # Bump when extraction gains features; documents indexed by an older version can be re-indexed
-EXTRACTOR_VERSION = 4           # 2: tables, figures, cross-references; 3: MIL-style conventions, identifiers;
-                                # 4: identifiers written with look-alike dots and dashes
+EXTRACTOR_VERSION = 5           # 2: tables, figures, cross-references; 3: MIL-style conventions, identifiers;
+                                # 4: identifiers written with look-alike dots and dashes; 5: deeper clause
+                                # numbers, appendix sections numbered in tens, list items under "shall:"
 
 # Identifier discovery: a family (shape such as "K#.#") counts as identifiers when it has at least
 # this many distinct values, appearing in at least this many passages. Adjustable per document in
@@ -72,6 +89,8 @@ OCR_LANGUAGE = "eng"
 
 # Search
 DEFAULT_MAX_RESULTS = 25
+PARTIAL_MATCH_BELOW = 10        # Plain-word searches with fewer passages containing every word than this also
+                                # list passages containing some of them (a question rarely matches word for word)
 HEADING_SCORE_WEIGHT = 0.5      # BM25 favours very short text; keeps bare headings below body passages
 MAX_DOCUMENT_ORDER_RESULTS = 500
 # Meaning in search: keyword and meaning matches are merged by reciprocal rank fusion
@@ -87,6 +106,16 @@ VIEWER_OCR_DPI = 200            # Lower than ingest OCR: only needs word positio
 VIEWER_ZOOM_LEVELS = [1.0, 1.5, 2.0, 3.0]  # Display width relative to the pane; 1.0 = fit width
 VIEWER_RENDER_SCALE = 2.0       # Pixels per PDF point at fit width: sharp on high-DPI screens
 VIEWER_MAX_RENDER_SCALE = 5.0   # Caps image size at high zoom
+
+# Source code (the Code view)
+CODE_SKIP_FOLDERS = {           # Build output and downloaded dependencies: not the project's own source
+    "node_modules", "bower_components", "target", "build", "dist", "out", "coverage", "__pycache__", "venv",
+}                               # Folders starting with "." (.git, .gradle, .idea…) are always skipped
+CODE_MAX_FILE_BYTES = 1_000_000 # Larger source files are generated or bundled, and are skipped
+CODE_MAX_RESULTS = 300          # Symbols, lines or usages listed at once
+CODE_CALL_DEPTH = 4             # Levels followed in caller and callee trees
+CODE_CALL_WIDTH = 30            # Callers or callees listed per step of a tree
+CODE_CONTEXT_LINES = 40         # Lines shown either side of the line being looked at
 
 # Research workflow
 RECENT_SEARCHES = 12            # Shown in the sidebar

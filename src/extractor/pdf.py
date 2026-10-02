@@ -7,7 +7,7 @@ from typing import Callable, List, Optional
 from src import config
 from src.extractor.identifiers import extract_occurrences
 from src.extractor.objects import PageFigure, PageTable, find_figures, find_tables, find_xrefs, parse_caption
-from src.extractor.provisions import classify_provision
+from src.extractor.provisions import classify_provision, inherit_list_provisions
 from src.extractor.structure import HeadingDetector, find_running_text, is_running_text
 from src.models import CrossRef, ExtractedDocument, TableData, TextBlock
 
@@ -82,6 +82,7 @@ class PDFExtractor:
 
             for page in pages:
                 self._emit_page(page, running_keys, detector, result)
+        result.blocks = inherit_list_provisions(result.blocks)
 
         for block in result.blocks:
             # A caption or heading naming itself ("Annex A (informative) …") isn't a reference

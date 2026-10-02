@@ -3,27 +3,33 @@ Background indexing: adding, re-indexing and embedding documents without blockin
 
 Jobs are processed one at a time by a worker thread with its own database connection, so searches,
 pins and page views carry on meanwhile. Each job's stage and progress are kept for the app to show.
+
+The queue is also kept in the library (uploads are stored as soon as they're submitted), so jobs an
+earlier run of the app didn't finish are picked up again when it starts.
 """
-import itertools
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from src import config
+from src.code.store import CodeStore
 from src.extractor.pdf import PDFExtractor
 from src.search.library import Library
 
-ADD, REINDEX, EMBED = "add", "reindex", "embed"
+ADD, REINDEX, EMBED, CODE = "add", "reindex", "embed", "code"
 QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
 
 
 @dataclass
 class Job:
     id: int
-    kind: str                       # ADD, REINDEX or EMBED
-    name: str                       # File name or document title
-    file_bytes: Optional[bytes] = None
-    doc_id: Optional[int] = None
+    kind: str                       # ADD, REINDEX, EMBED or CODE
+    name: str                       # File name, document title or codebase name
+    sha256: Optional[str] = None    # ADD: the upload, as stored in the library folder
+    doc_id: Optional[int] = None    # The document; for CODE, the codebase
+    resumed: bool = False           # Left unfinished by an earlier run of the app
     status: str = QUEUED
     stage: str = "Waiting"
     done: int = 0
@@ -42,17 +48,32 @@ class Indexer:
     library_factory: type = Library
     jobs: List[Job] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _ids: itertools.count = field(default_factory=lambda: itertools.count(1))
+    _queue: Optional[Library] = None        # Connection for the stored queue, used under the lock
     _worker: Optional[threading.Thread] = None
 
-    def submit(self, kind: str, name: str, file_bytes: Optional[bytes] = None, doc_id: Optional[int] = None) -> Job:
-        job = Job(id=next(self._ids), kind=kind, name=name, file_bytes=file_bytes, doc_id=doc_id)
+    def __post_init__(self) -> None:
         with self._lock:
+            self._queue = self.library_factory()
+            for row in self._queue.unfinished_jobs():
+                self.jobs.append(Job(id=row["id"], kind=row["kind"], name=row["name"], sha256=row["sha256"],
+                                     doc_id=row["doc_id"], resumed=True))
+            self._start_worker()
+
+    def submit(self, kind: str, name: str, file_bytes: Optional[bytes] = None, doc_id: Optional[int] = None) -> Job:
+        with self._lock:
+            # The upload is stored before the job is queued, so neither is lost if the app stops
+            sha256 = self._queue.store_pdf(file_bytes) if file_bytes is not None else None
+            job = Job(id=self._queue.queue_job(kind, name, sha256, doc_id), kind=kind, name=name,
+                      sha256=sha256, doc_id=doc_id)
             self.jobs.append(job)
-            if self._worker is None or not self._worker.is_alive():
-                self._worker = threading.Thread(target=self._run, name="searchables-indexer", daemon=True)
-                self._worker.start()
+            self._start_worker()
         return job
+
+    def _start_worker(self) -> None:
+        waiting = any(j.status == QUEUED for j in self.jobs)
+        if waiting and (self._worker is None or not self._worker.is_alive()):
+            self._worker = threading.Thread(target=self._run, name="searchables-indexer", daemon=True)
+            self._worker.start()
 
     def active(self) -> List[Job]:
         with self._lock:
@@ -63,12 +84,26 @@ class Indexer:
             return [j for j in self.jobs if j.status in (DONE, FAILED)]
 
     def pending_doc_ids(self) -> set:
-        """Documents with a re-index or embed job waiting or running (so buttons can be disabled)."""
-        return {j.doc_id for j in self.active() if j.doc_id is not None}
+        """
+        Documents with a job waiting or running (so buttons can be disabled), including a document
+        being added: it's in the library once its pages are read, while its passages are still being read.
+        """
+        active = [j for j in self.active() if j.kind != CODE]
+        ids = {j.doc_id for j in active if j.doc_id is not None}
+        with self._lock:
+            added = [self._queue.document_by_sha(j.sha256) for j in active if j.sha256]
+        return ids | {doc.id for doc in added if doc}
+
+    def pending_codebases(self) -> set:
+        """Codebases with a scan waiting or running."""
+        return {j.doc_id for j in self.active() if j.kind == CODE}
 
     def _next(self) -> Optional[Job]:
         with self._lock:
-            return next((j for j in self.jobs if j.status == QUEUED), None)
+            job = next((j for j in self.jobs if j.status == QUEUED), None)
+            if job is None:
+                self._worker = None  # This worker is about to end: the next submit starts another
+            return job
 
     def _run(self) -> None:
         library = self.library_factory()  # This thread's own connection
@@ -84,18 +119,26 @@ class Indexer:
 
             try:
                 self._process(library, extractor, job, progress)
-                job.status = DONE
+                status = DONE
             except Exception as e:  # Any failure is reported on the job; the worker carries on
-                job.status = FAILED
+                status = FAILED
                 job.result = str(e) or e.__class__.__name__
-            finally:
-                job.file_bytes = None  # Free the upload's memory
-                job.finished_at = time.time()
+            try:
+                library.finish_job(job.id)
+            except sqlite3.Error:
+                pass  # Still queued in the library: looked at again when the app next starts
+            job.finished_at = time.time()
+            job.status = status
 
     @staticmethod
     def _process(library: Library, extractor: PDFExtractor, job: Job, progress) -> None:
         if job.kind == ADD:
-            doc, extracted = library.add_document(job.file_bytes, job.name, extractor, progress)
+            doc, extracted = library.add_stored_document(job.sha256, job.name, extractor, progress)
+            if extracted is None and job.resumed and doc.embedding_model != config.EMBEDDING_ID:
+                # Stopped while its passages were being read: carry on from the vectors already saved
+                library.embed_document(doc.id, progress)
+                job.result = f"Added {doc.title}: {doc.page_count} pages, {doc.block_count} passages"
+                return
             if extracted is None:
                 job.result = f"{job.name} is already in the library as “{doc.title}”."
                 return
@@ -116,6 +159,10 @@ class Indexer:
         elif job.kind == EMBED:
             count = library.embed_document(job.doc_id, progress)
             job.result = f"Added meaning search to {job.name}: {count} passages"
+        elif job.kind == CODE:
+            found = CodeStore(library.conn).index(job.doc_id, progress)
+            job.result = (f"Scanned {job.name}: {found['files']:,} files, {found['symbols']:,} symbols "
+                          f"({found['changed']:,} read, {found['removed']:,} removed)")
 
 
 def _warnings(embedding_model: str, unreadable_pages: List[int]) -> str:
@@ -123,7 +170,7 @@ def _warnings(embedding_model: str, unreadable_pages: List[int]) -> str:
     if not embedding_model:
         notes.append("Meaning search isn't available for it yet: the embedding model couldn't be loaded "
                      "(it's downloaded once, which needs an internet connection). Use “Add meaning search” "
-                     "in the Library tab once it's available.")
+                     "in the Library view once it's available.")
     if unreadable_pages:
         pages = ", ".join(map(str, unreadable_pages[:20]))
         notes.append(f"Scanned pages {pages} could not be read and aren't searchable.")

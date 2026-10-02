@@ -44,7 +44,8 @@ class Document:
     ocr_pages: int
     added_at: str
     extract_version: int = 1    # Extractor version that indexed it; older ones lack newer features
-    embedding_model: str = ""   # Model that made its meaning vectors ("" = none yet)
+    embedding_model: str = ""   # Model that made its meaning vectors ("" = none yet, or not all of them)
+    embedding_started: str = "" # Model whose vectors are part-way done: an interrupted run resumes from them
 
 
 @dataclass(frozen=True)
@@ -224,8 +225,10 @@ class SearchResult:
     rank: int
     highlighted_text: Optional[str] = None  # HTML-safe text with <mark> around matched terms
     doc_title: str = ""
-    match: str = "keyword"      # "keyword", "meaning" (found only by meaning) or "both"
+    match: str = "keyword"      # "keyword" (has every word), "some" (only some of them), "meaning" (found by
+                                # meaning, without every word) or "both"
     similarity: Optional[float] = None  # Meaning similarity to the query (0–1), when matched by meaning
+    rows: Tuple[int, ...] = ()  # Tables found by meaning: the rows that matched (numbered from 1)
 
     @property
     def citation(self) -> str:

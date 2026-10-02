@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs Searchables (the Streamlit app) as a Windows service using WinSW.
+    Installs Searchables as a Windows service using WinSW.
 
 .DESCRIPTION
     Creates the Python environment, prepares a data folder the service account can write to,
@@ -16,7 +16,7 @@
 
 .EXAMPLE
     .\install-service.ps1 -Address 0.0.0.0 -Port 8600 -OpenFirewall
-    Reachable from other machines on the network (the app has no login; see README).
+    Reachable from other machines on the network (protected only by the app's password, over plain HTTP; see README).
 #>
 [CmdletBinding()]
 param(
@@ -109,8 +109,9 @@ if ($ServiceAccount -ne "LocalSystem" -and $BasePython.StartsWith($env:USERPROFI
 Write-Step "Installing Python packages (first run can take several minutes)"
 & $VenvPython -m pip install --upgrade pip --quiet
 if ($LASTEXITCODE -ne 0) { throw "Upgrading pip failed." }
-& $VenvPython -m pip install -r (Join-Path $AppDir "requirements.txt") --quiet
-if ($LASTEXITCODE -ne 0) { throw "Installing requirements.txt failed." }
+# The lock file pins every package to an exact version and hash; pip refuses anything else
+& $VenvPython -m pip install --require-hashes -r (Join-Path $AppDir "requirements.lock") --quiet
+if ($LASTEXITCODE -ne 0) { throw "Installing requirements.lock failed." }
 
 # The meaning-search model is downloaded once here (into the project's models folder), so the service
 # never needs the internet or write access to the project
@@ -128,6 +129,10 @@ try {
 Write-Step "Data folder: $DataDir"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
+# ProgramData is readable by every user of the machine by default. Stop inheriting that, so only
+# administrators, SYSTEM and the service account can open the stored PDFs past the app's password.
+& icacls $DataDir /inheritance:r /grant "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Restricting access to $DataDir failed." }
 if ($AccountSids.ContainsKey($ServiceAccount)) {
     $Sid = $AccountSids[$ServiceAccount]
     # Modify on the data folder (library, logs); read & execute on the app and its Python environment
@@ -174,14 +179,7 @@ Write-Host ("    WinSW SHA-256: " + (Get-FileHash $Wrapper -Algorithm SHA256).Ha
             "  (compare with the release page if you want to verify it)")
 
 # ---- Service configuration -----------------------------------------------------------------
-$Arguments = @(
-    "-m", "streamlit", "run", "`"$(Join-Path $AppDir 'app.py')`"",
-    "--server.port", $Port,
-    "--server.address", $Address,
-    "--server.headless", "true",
-    "--server.fileWatcherType", "none",   # No source-file polling in production
-    "--browser.gatherUsageStats", "false"
-) -join " "
+$Arguments = @("-m", "src.server", "--port", $Port, "--address", $Address) -join " "
 
 $EnvLines = @(
     "    <env name=`"SEARCHABLES_DATA_DIR`" value=`"$(Get-XmlSafe $DataDir)`" />",
@@ -194,7 +192,7 @@ $Xml = @"
 <service>
     <id>$ServiceName</id>
     <name>$DisplayName</name>
-    <description>Standards Search: Streamlit app for searching licensed standards PDFs, on port $Port.</description>
+    <description>Searchables: local research tool for standards PDFs and source code, on port $Port.</description>
     <executable>$(Get-XmlSafe $VenvPython)</executable>
     <arguments>$(Get-XmlSafe $Arguments)</arguments>
     <workingdirectory>$(Get-XmlSafe $AppDir)</workingdirectory>
@@ -246,7 +244,7 @@ $Url = "http://${ProbeHost}:$Port"
 $Healthy = $false
 foreach ($i in 1..60) {
     try {
-        $Response = Invoke-WebRequest -Uri "$Url/_stcore/health" -UseBasicParsing -TimeoutSec 2
+        $Response = Invoke-WebRequest -Uri "$Url/api/session" -UseBasicParsing -TimeoutSec 2
         if ($Response.StatusCode -eq 200) { $Healthy = $true; break }
     } catch { Start-Sleep -Seconds 1 }
 }
@@ -255,7 +253,7 @@ if ($Healthy) {
     Write-Host ""
     Write-Host "Searchables is running: $Url" -ForegroundColor Green
     if (-not $IsLoopback) {
-        Write-Warning "The app is reachable from the network and has no login. Anyone who can reach port $Port can read and delete documents."
+        Write-Warning "The app is reachable from the network. Only its password protects the library, and it travels unencrypted (plain HTTP) to anyone who can reach port $Port."
     }
 } else {
     Write-Warning "The service started but the app didn't answer within 60 seconds. Check the logs in $(Join-Path $DataDir 'logs')."

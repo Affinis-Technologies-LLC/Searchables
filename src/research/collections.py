@@ -121,6 +121,10 @@ class CollectionStore:
                 "DELETE FROM pins WHERE collection_id = ? AND pin_key = ?", (collection_id, pin_key(block))
             )
 
+    def remove_pin_key(self, collection_id: int, key: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM pins WHERE collection_id = ? AND pin_key = ?", (collection_id, key))
+
     def remove_pin(self, pin_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM pins WHERE id = ?", (pin_id,))
