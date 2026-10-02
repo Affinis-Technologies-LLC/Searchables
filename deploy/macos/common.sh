@@ -45,6 +45,10 @@ ensure_environment() {
         echo "$current" > "$stamp"
     fi
 
+    # Everything the app needs is loaded once now, so a problem shows here rather than as an app that won't start
+    (cd "$APP_DIR" && "$VENV_PYTHON" -m src.server --check) \
+        || die "The app can't start (see above). If packages are at fault, delete the .venv folder and run this again."
+
     # The meaning-search model is downloaded once here, so the app itself never needs the internet
     if ! (cd "$APP_DIR" && "$VENV_PYTHON" -m src.search.semantic); then
         warn "The meaning-search model couldn't be downloaded (no internet?). Search still works by words; \

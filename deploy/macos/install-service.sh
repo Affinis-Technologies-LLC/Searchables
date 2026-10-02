@@ -122,4 +122,6 @@ for _ in $(seq 1 60); do
     fi
     sleep 1
 done
-die "The service started but the app didn't answer within 60 seconds. Check $LOG_DIR/searchables.err.log."
+warn "Last lines of $LOG_DIR/searchables.err.log:"
+tail -n 15 "$LOG_DIR/searchables.err.log" >&2 2>/dev/null || true
+die "The service started but the app didn't answer within 60 seconds (is port $PORT already in use? lsof -i :$PORT)."

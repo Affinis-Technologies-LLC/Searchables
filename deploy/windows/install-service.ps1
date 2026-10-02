@@ -118,6 +118,9 @@ if ($LASTEXITCODE -ne 0) { throw "Installing requirements.lock failed." }
 Write-Step "Preparing the meaning-search model (downloads about 440 MB the first time)"
 Push-Location $AppDir
 try {
+    # Everything the app needs is loaded once now, so a problem shows here rather than as a service that won't start
+    & $VenvPython -m src.server --check
+    if ($LASTEXITCODE -ne 0) { throw "The app can't start (see above). If packages are at fault, delete the .venv folder and run this script again." }
     & $VenvPython -m src.search.semantic
     if ($LASTEXITCODE -ne 0) {
         Write-Warning ("The meaning-search model couldn't be downloaded (no internet?). Search still works by words; " +
@@ -256,6 +259,8 @@ if ($Healthy) {
         Write-Warning "The app is reachable from the network. Only its password protects the library, and it travels unencrypted (plain HTTP) to anyone who can reach port $Port."
     }
 } else {
-    Write-Warning "The service started but the app didn't answer within 60 seconds. Check the logs in $(Join-Path $DataDir 'logs')."
+    $ErrLog = Join-Path $DataDir "logs\$ServiceName.err.log"
+    if (Test-Path $ErrLog) { Write-Host "Last lines of ${ErrLog}:"; Get-Content $ErrLog -Tail 15 | Write-Host }
+    Write-Warning "The service started but the app didn't answer within 60 seconds (is port $Port already in use?). Logs are in $(Join-Path $DataDir 'logs')."
     exit 1
 }

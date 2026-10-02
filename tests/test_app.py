@@ -16,7 +16,8 @@ PASSWORD = "correct horse battery"
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
+    monkeypatch.setenv("SEARCHABLES_STREAMLIT", "1")   # It's switched off otherwise, in favour of src/server
     config.AUTH_FILE.unlink(missing_ok=True)   # Each test starts at the set-up page; the library is shared
     test = AppTest.from_file(str(Path(__file__).parent.parent / "app.py"), default_timeout=60)
     yield test.run()
@@ -38,6 +39,12 @@ def test_set_up_then_search(app, standard_pdf, model):
     app.text_input(key="query_input").set_value("how long must calibration records be kept").run()
     assert not app.exception
     assert any("matching passages" in caption.value for caption in app.caption)
+
+
+def test_switched_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv("SEARCHABLES_STREAMLIT", raising=False)
+    off = AppTest.from_file(str(Path(__file__).parent.parent / "app.py"), default_timeout=60).run()
+    assert not off.exception and off.title[0].value == "Searchables has a new interface" and not off.text_input
 
 
 def test_wrong_password_is_refused(app):

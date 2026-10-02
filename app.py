@@ -1,4 +1,5 @@
 import html
+import os
 import sqlite3
 import threading
 from typing import List, Optional, Tuple
@@ -37,6 +38,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# This Streamlit interface is switched off: the app is now the workbench served by src/server.
+# Set SEARCHABLES_STREAMLIT=1 to run it anyway (the tests do) until it's removed.
+if os.environ.get("SEARCHABLES_STREAMLIT") != "1":
+    st.title("Searchables has a new interface")
+    st.info("This older interface is switched off. Stop this program, then start the app with "
+            "`deploy/macos/run.sh` (macOS), `deploy\\windows\\run.ps1` (Windows) or "
+            "`python -m src.server`, and open http://127.0.0.1:8501.")
+    st.stop()
 
 # Inline Layout Styles
 st.markdown("""

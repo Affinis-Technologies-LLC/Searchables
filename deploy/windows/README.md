@@ -43,7 +43,7 @@ Set-ExecutionPolicy -Scope Process Bypass   # Allows these unsigned scripts for 
 
 The script:
 
-1. creates `.venv` and installs the packages pinned in `requirements.lock` (several minutes the first time);
+1. creates `.venv`, installs the packages pinned in `requirements.lock` (several minutes the first time), and checks the app can start;
 2. creates the data folder `C:\ProgramData\Searchables` and lets the service account write to it;
 3. finds Tesseract's language data;
 4. downloads WinSW (a pinned release from GitHub) and writes the service configuration;
@@ -138,7 +138,7 @@ account's permissions.
 | Symptom | Check |
 |---|---|
 | Install stops at "Python is installed for your user only" | Reinstall Python with "Install for all users", delete `.venv`, run the script again |
-| Service starts, then stops | `Searchables.err.log` in the logs folder. Most often a missing package: re-run the install script |
+| Service starts, then stops | `Searchables.err.log` in the logs folder. To see what's wrong directly: `.venv\Scripts\python.exe -m src.server --check` from the project folder |
 | "Access is denied" in the logs | The project or data folder isn't readable by the service account: re-run the install script, which re-applies permissions |
 | Scanned pages aren't searchable | Install Tesseract, re-run the install script, then **Re-index** the affected documents in the Library view |
 | Page doesn't load from another machine | The default address is `127.0.0.1`; re-run with `-Address 0.0.0.0 -OpenFirewall` |

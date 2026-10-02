@@ -61,6 +61,9 @@ if (-not (Test-Path $Stamp) -or (Get-Content $Stamp -Raw).Trim() -ne $Current) {
 # The meaning-search model is downloaded once, so the app itself never needs the internet
 Push-Location $AppDir
 try {
+    # Everything the app needs is loaded once now, so a problem shows here rather than as an app that won't start
+    & $VenvPython -m src.server --check
+    if ($LASTEXITCODE -ne 0) { throw "The app can't start (see above). If packages are at fault, delete the .venv folder and run this again." }
     & $VenvPython -m src.search.semantic
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "The meaning-search model couldn't be downloaded (no internet?). Search still works by words."
@@ -82,3 +85,4 @@ if (-not $env:TESSDATA_PREFIX) {
 Set-Location $AppDir
 Write-Step "Starting Searchables on http://127.0.0.1:$Port (Ctrl+C to stop)"
 & $VenvPython -m src.server --port $Port --address 127.0.0.1
+exit $LASTEXITCODE

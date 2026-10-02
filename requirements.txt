@@ -2,7 +2,7 @@
 starlette>=1.0,<2.0
 uvicorn>=0.30,<1.0
 
-# The earlier Streamlit interface (app.py), kept until the new one has been tried: streamlit run app.py
+# The earlier Streamlit interface (app.py): switched off, kept until the new one has been tried
 streamlit>=1.64,<2.0
 PyMuPDF>=1.24.14,<2.0
 pandas>=2.2,<3.0
