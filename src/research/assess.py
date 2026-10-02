@@ -13,21 +13,26 @@ from typing import Dict, Iterable, List, Sequence, Set, Tuple
 from src.extractor.identifiers import family_of
 from src.extractor.provisions import PERMISSION, RECOMMENDATION, REQUIREMENT, classify_provision
 
-# Units recognised after a number; plurals and spellings map to one form
+# Units recognised after a number, in any case; plurals and spellings map to one form
 _UNITS = {
     "%": "%", "percent": "%",
-    "s": "s", "sec": "s", "second": "s", "seconds": "s", "ms": "ms", "millisecond": "ms", "milliseconds": "ms",
-    "min": "min", "minute": "min", "minutes": "min", "h": "h", "hr": "h", "hour": "h", "hours": "h",
+    "sec": "s", "second": "s", "seconds": "s", "ms": "ms", "millisecond": "ms", "milliseconds": "ms",
+    "min": "min", "minute": "min", "minutes": "min", "hr": "h", "hour": "h", "hours": "h",
     "day": "day", "days": "day", "week": "week", "weeks": "week", "month": "month", "months": "month",
     "year": "year", "years": "year", "cycle": "cycle", "cycles": "cycle", "times": "times",
     "bar": "bar", "mbar": "mbar", "pa": "Pa", "kpa": "kPa", "mpa": "MPa", "psi": "psi",
-    "mm": "mm", "cm": "cm", "m": "m", "km": "km", "nm": "nm", "ft": "ft", "in": "in",
-    "g": "g", "kg": "kg", "t": "t", "lb": "lb", "°c": "°C", "c": "°C", "k": "K", "°f": "°F",
-    "v": "V", "kv": "kV", "a": "A", "ma": "mA", "w": "W", "kw": "kW", "hz": "Hz", "khz": "kHz", "mhz": "MHz",
+    "mm": "mm", "cm": "cm", "km": "km", "nm": "nm", "ft": "ft", "inch": "in", "inches": "in",
+    "kg": "kg", "lb": "lb", "°c": "°C", "°f": "°F",
+    "kv": "kV", "ma": "mA", "kw": "kW", "hz": "Hz", "khz": "kHz", "mhz": "MHz",
     "ghz": "GHz", "db": "dB", "dbm": "dBm", "bit": "bit", "bits": "bit", "byte": "byte", "bytes": "byte",
     "kbps": "kbps", "mbps": "Mbps",
 }
-_QUANTITY = re.compile(r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(%|°[CFcf]|[A-Za-z]+)\b")
+# One-letter symbols only count as written: "5 A" is amperes, but "Table 5 a" isn't. A bare "in" is
+# never inches ("at least 3 in each group").
+_SYMBOLS = {"s": "s", "m": "m", "g": "g", "h": "h", "t": "t", "A": "A", "V": "V", "W": "W", "K": "K", "C": "°C"}
+# The number may group thousands with commas ("1,000") and use either decimal mark ("1.5", "1,5")
+_QUANTITY = re.compile(r"(?<![\w.,])(\d+(?:,\d{3})*(?:[.,]\d+)?)\s*(%|°[CFcf]|[A-Za-z]+)(?![A-Za-z])")
+_THOUSANDS = re.compile(r",(?=\d{3}(?!\d))")
 _STRENGTH = {REQUIREMENT: 3, RECOMMENDATION: 2, PERMISSION: 1}
 _WORD_FOR = {REQUIREMENT: "shall", RECOMMENDATION: "should", PERMISSION: "may"}
 _NEGATED = re.compile(r"\b(?:shall|must|should)\s+not\b|\bshall\s*n[o']t\b", re.IGNORECASE)
@@ -44,10 +49,16 @@ def quantities(text: str) -> Dict[str, Set[str]]:
     """Unit → the values given in that unit: "an interval of 12 months" → {"month": {"12"}}."""
     found: Dict[str, Set[str]] = defaultdict(set)
     for value, unit in _QUANTITY.findall(text):
-        normal = _UNITS.get(unit.lower())
+        normal = _SYMBOLS.get(unit) or _UNITS.get(unit.lower())
         if normal:
-            found[normal].add(value.replace(",", "."))
+            found[normal].add(_number(value))
     return found
+
+
+def _number(value: str) -> str:
+    """One spelling per number, so "12.0" and "12" (or "1,000" and "1000") aren't a difference."""
+    value = _THOUSANDS.sub("", value).replace(",", ".")
+    return value.rstrip("0").rstrip(".") if "." in value else value
 
 
 _COUNTED_UNITS = {"day", "week", "month", "year", "cycle", "bit", "byte"}  # Written "12 months", not "12 month"
@@ -64,12 +75,15 @@ def _fmt(values: Iterable[str], unit: str) -> str:
 
 def assess(pairs: Sequence[Tuple[str, str, float]], focus_identifiers: Sequence[str] = (),
            other_identifiers: Sequence[str] = (), corresponding: float = 0.86,
-           same_content: float = 0.97) -> Tuple[List[Finding], Tuple[str, str]]:
+           same_content: float = 0.97, focus_provision: str = "",
+           other_provision: str = "") -> Tuple[List[Finding], Tuple[str, str]]:
     """
     How another passage differs from the focus passage, both about the same topic. `pairs` are the
     focus's sentences each matched with their closest sentence in the other passage (best first);
     pairs at least `corresponding` similar are taken to say the same kind of thing, and are compared
-    for values, provision strength and negation. Returns the findings and the sentence pair to show.
+    for values, provision strength and negation. `focus_provision` and `other_provision` are the
+    provisions the passages take from a list's lead-in ("The terminal shall:"), used for sentences
+    with no verbal form of their own. Returns the findings and the sentence pair to show.
     """
     findings: List[Finding] = []
     shown = pairs[0][:2]
@@ -83,7 +97,7 @@ def assess(pairs: Sequence[Tuple[str, str, float]], focus_identifiers: Sequence[
             if mine[unit] != yours[unit]:
                 found.append(Finding("Different value", f"{_fmt(mine[unit], unit)} → {_fmt(yours[unit], unit)}"))
         # Provision strength of the corresponding sentences: shall > should > may
-        a, b = classify_provision(ours), classify_provision(theirs)
+        a, b = classify_provision(ours) or focus_provision, classify_provision(theirs) or other_provision
         if _STRENGTH.get(a) and _STRENGTH.get(b) and a != b:
             label = "Stronger requirement" if _STRENGTH[b] > _STRENGTH[a] else "Weaker requirement"
             found.append(Finding(label, f"{_WORD_FOR[a]} → {_WORD_FOR[b]}"))

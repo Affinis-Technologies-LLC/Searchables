@@ -14,6 +14,9 @@ MAIN_TAB = "main_tab"
 SEARCH_TAB, COMPARE_TAB, GLOSSARY_TAB, COLLECTIONS_TAB, LIBRARY_TAB = (
     "Search", "Compare", "Glossary", "Collections", "Library"
 )
+# The sidebar's tabs choose what the app is working on: documents (the tabs above) or source code
+SIDE_TAB = "side_tab"
+DOCUMENTS_SIDE, CODE_SIDE = "Documents", "Code"
 
 
 def show_page(doc_id: int, page: int, target=None, focus: Optional[int] = None) -> None:
@@ -51,6 +54,7 @@ def set_query(query: str) -> None:
     st.session_state["query"] = query
     st.session_state.pop("query_input", None)
     st.session_state[MAIN_TAB] = SEARCH_TAB
+    st.session_state[SIDE_TAB] = DOCUMENTS_SIDE
 
 
 # ---- Identifier trail ---------------------------------------------------------------------------

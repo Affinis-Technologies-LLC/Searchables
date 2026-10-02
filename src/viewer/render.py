@@ -1,7 +1,7 @@
 """Renders PDF pages as images with search hits highlighted in place."""
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 import pymupdf
 
@@ -21,6 +21,37 @@ class RenderedPage:
     hit_count: int      # Highlights drawn (0 on a scanned page when OCR is unavailable)
 
 
+def _hit_quads(page: pymupdf.Page, terms: Sequence[str], ocr_dpi: int = config.VIEWER_OCR_DPI) -> list:
+    """Where `terms` appear on a page, as quads. Scanned pages are read with OCR to find them."""
+    if not terms:
+        return []
+    # Scanned pages have no text layer to search, so OCR one (callers cache the result)
+    textpage = None
+    if looks_scanned(page) and ocr_available():
+        try:
+            textpage = page.get_textpage_ocr(language=config.OCR_LANGUAGE, dpi=ocr_dpi, full=True)
+        except Exception:
+            textpage = None  # Fall back to the outline alone
+
+    # Single-word terms match whole words only: search_for() finds substrings, which would mark
+    # "K3.5" inside "K3.5C1" and "calibration" inside "recalibration"
+    words = page.get_text("words", textpage=textpage)
+    quads = []
+    for term in terms:
+        if " " in term:
+            quads.extend(page.search_for(term, quads=True, textpage=textpage))
+        else:
+            wanted = term.lower()
+            quads.extend(pymupdf.Rect(w[:4]).quad for w in words if w[4].strip(_WORD_PUNCTUATION).lower() == wanted)
+    return quads
+
+
+def hit_rects(pdf_path: Path, page_no: int, terms: Sequence[str]) -> List[BBox]:
+    """Rectangles (PDF points, top-left origin) around every occurrence of `terms` on a page (1-based)."""
+    with pymupdf.open(pdf_path) as doc:
+        return [tuple(round(v, 1) for v in quad.rect) for quad in _hit_quads(doc[page_no - 1], terms)]
+
+
 def render_page(
     pdf_path: Path,
     page_no: int,
@@ -37,24 +68,7 @@ def render_page(
     with pymupdf.open(pdf_path) as doc:
         page = doc[page_no - 1]
 
-        # Scanned pages have no text layer to search, so OCR one (callers cache the rendered result)
-        textpage = None
-        if terms and looks_scanned(page) and ocr_available():
-            try:
-                textpage = page.get_textpage_ocr(language=config.OCR_LANGUAGE, dpi=config.VIEWER_OCR_DPI, full=True)
-            except Exception:
-                textpage = None  # Fall back to the outline alone
-
-        # Single-word terms match whole words only: search_for() finds substrings, which would mark
-        # "K3.5" inside "K3.5C1" and "calibration" inside "recalibration"
-        words = page.get_text("words", textpage=textpage) if terms else []
-        quads = []
-        for term in terms:
-            if " " in term:
-                quads.extend(page.search_for(term, quads=True, textpage=textpage))
-            else:
-                wanted = term.lower()
-                quads.extend(pymupdf.Rect(w[:4]).quad for w in words if w[4].strip(_WORD_PUNCTUATION).lower() == wanted)
+        quads = _hit_quads(page, terms)
         if quads:
             highlight = page.add_highlight_annot(quads)
             highlight.set_colors(stroke=_HIT_COLOR)

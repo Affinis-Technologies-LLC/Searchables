@@ -24,6 +24,8 @@ def to_markdown(collection_name: str, pins: List[Pin]) -> str:
             lines.append("| " + " | ".join(_md_cell(c) for c in columns) + " |")
             lines.append("|" + "---|" * len(columns))
             lines += ["| " + " | ".join(_md_cell(c) for c in row) + " |" for row in pin.table["rows"]]
+        elif pin.kind == "code":
+            lines += ["```", pin.text, "```"]
         else:
             lines.append(f"> {pin.text}")
         lines.append("")
@@ -54,6 +56,9 @@ def to_docx(collection_name: str, pins: List[Pin]) -> bytes:
                 cells = table.add_row().cells
                 for cell, value in zip(cells, row):
                     cell.text = value
+        elif pin.kind == "code":
+            code = doc.add_paragraph().add_run(pin.text)
+            code.font.name, code.font.size = "Consolas", Pt(9)
         else:
             doc.add_paragraph(pin.text, style="Quote")
         if pin.note:

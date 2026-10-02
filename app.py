@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 import streamlit as st
 from src import config
 from src.extractor.pdf import PDFExtractor
+from src.code.store import CodeStore
 from src.research.collections import CollectionStore
 from src.extractor.identifiers import identifier_key
 from src.models import SearchResult
@@ -12,6 +13,7 @@ from src.search.library import CONTENT_KINDS, IDENTIFIER_GROUP_TITLES, PROVISION
 from src.search.query import IDENTIFIER_HELP, SYNTAX_HELP
 from src.research.glossary import terms_in_text
 from src.ui.auth import account_menu, require_login
+from src.ui.code_tab import render_code_browser, render_code_sidebar
 from src.ui.collections_tab import render_collections
 from src.ui.compare_tab import render_compare
 from src.ui.glossary_tab import render_glossary
@@ -20,7 +22,8 @@ from src.search.indexer import Indexer
 from src.ui.library_tab import indexing_indicator, render_library_tab
 from src.ui.pins import PinContext, pin_button
 from src.ui.related_panel import left_pane
-from src.ui.state import (COLLECTIONS_TAB, COMPARE_TAB, GLOSSARY_TAB, LIBRARY_TAB, MAIN_TAB, SEARCH_TAB,
+from src.ui.state import (CODE_SIDE, COLLECTIONS_TAB, COMPARE_TAB, DOCUMENTS_SIDE, GLOSSARY_TAB, LIBRARY_TAB, MAIN_TAB,
+                          SEARCH_TAB, SIDE_TAB,
                           follow_identifier, replace_identifier, select_result, set_query, show_page, trail_back)
 from src.ui.terms import glossary
 from src.ui.viewer import render_viewer
@@ -103,6 +106,14 @@ st.markdown("""
         font-size: 0.85rem; opacity: 0.75; margin: 0 0 6px; padding-left: 2px;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+    .code-line { font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; background: none; padding: 0; }
+    .code-target { font-size: 0.75rem; opacity: 0.7; }
+    .code-outside { font-size: 0.85rem; margin: 0 0 6px 8px; }
+    .code-frame {
+        max-height: 900px; overflow: auto; background: #FFFFFF; padding: 6px 8px;
+        border: 1px solid rgba(128, 128, 128, 0.2); border-radius: 4px;
+    }
+    .code-frame pre { white-space: pre; }
     .diff-del { background: #FEE2E2; color: #991B1B; }
     .diff-ins { background: #DCFCE7; color: #166534; text-decoration: none; }
     .badge-diff-changed { background: #B45309; color: #FFFFFF; }
@@ -143,8 +154,14 @@ def get_collections() -> CollectionStore:
     return CollectionStore(get_library().conn)
 
 
+@st.cache_resource
+def get_code_store() -> CodeStore:
+    return CodeStore(get_library().conn)
+
+
 library = get_library()
 store = get_collections()
+code_store = get_code_store()
 indexer = get_indexer()
 warm_up_meaning_model()
 extractor = PDFExtractor()
@@ -181,23 +198,33 @@ def _create_collection() -> None:
 
 # Sidebar Controls
 with st.sidebar:
-    st.header("Search Scope")
-    selected_docs = st.multiselect(
-        "Documents",
-        options=documents,
-        format_func=lambda d: d.title,
-        placeholder="All documents",
-    )
-    document_order = st.radio(
-        "Order results by", ["Relevance", "Position in document"], horizontal=True
-    ) == "Position in document"
-    content = st.pills("Content", list(CONTENT_KINDS), selection_mode="multi", default=list(CONTENT_KINDS))
-    # Nothing selected reads as "no filter" rather than an empty result list
-    kinds = [kind for name in (content or CONTENT_KINDS) for kind in CONTENT_KINDS[name]]
-    provision_names = st.pills("Provisions", list(PROVISION_FILTERS), selection_mode="multi",
-                               help="Classified by verbal form: shall, should, may; NOTE/EXAMPLE are informative")
-    provisions = [PROVISION_FILTERS[name] for name in provision_names]
-    max_results = st.slider("Max Results", min_value=5, max_value=100, value=config.DEFAULT_MAX_RESULTS, step=5)
+    # What's being searched: documents or source code. Both tabs are always drawn, so each keeps its
+    # settings while the other is open; the open one decides what the main area shows.
+    documents_side, code_side = st.tabs([DOCUMENTS_SIDE, CODE_SIDE], key=SIDE_TAB, on_change="rerun")
+    with documents_side:
+        st.header("Search Scope")
+        selected_docs = st.multiselect(
+            "Documents",
+            options=documents,
+            format_func=lambda d: d.title,
+            placeholder="All documents",
+        )
+        document_order = st.radio(
+            "Order results by", ["Relevance", "Position in document"], horizontal=True
+        ) == "Position in document"
+        content = st.pills("Content", list(CONTENT_KINDS), selection_mode="multi", default=list(CONTENT_KINDS))
+        # Nothing selected reads as "no filter" rather than an empty result list
+        kinds = [kind for name in (content or CONTENT_KINDS) for kind in CONTENT_KINDS[name]]
+        provision_names = st.pills("Provisions", list(PROVISION_FILTERS), selection_mode="multi",
+                                   help="Classified by verbal form: shall, should, may; NOTE/EXAMPLE are informative")
+        provisions = [PROVISION_FILTERS[name] for name in provision_names]
+        max_results = st.slider("Max Results", min_value=5, max_value=100, value=config.DEFAULT_MAX_RESULTS, step=5)
+        recent = library.recent_searches()
+        if recent:
+            st.header("Recent searches")
+            st.pills("Recent searches", recent, key="recent_pick", on_change=_pick_recent, label_visibility="collapsed")
+    with code_side:
+        codebase = render_code_sidebar(code_store, indexer)
 
     st.header("Collections")
     store.ensure_default()
@@ -218,12 +245,14 @@ with st.sidebar:
     account_menu()
     indexing_indicator(indexer)
 
-    recent = library.recent_searches()
-    if recent:
-        st.header("Recent searches")
-        st.pills("Recent searches", recent, key="recent_pick", on_change=_pick_recent, label_visibility="collapsed")
-
 # Main Dashboard
+if code_side.open:
+    st.title("Code Search")
+    st.caption(f"{codebase.name} · {codebase.root}" if codebase else "Symbols, usages, calls, dependencies and APIs "
+               "of Java, JavaScript and TypeScript source")
+    render_code_browser(code_store, indexer, store, active.id, codebase)
+    st.stop()
+
 st.title("Standards Search")
 st.caption(
     f"{len(documents)} document{'s' if len(documents) != 1 else ''} in the library · "
@@ -248,7 +277,7 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: 
         badges.append(f'<span class="badge badge-{block.provision}">{_PROVISION_BADGES[block.provision]}</span>')
     if res.match == "meaning":
         badges.append('<span class="badge badge-meaning" title="Found by meaning: it doesn\u2019t contain '
-                      'your search words">meaning</span>')
+                      'all your search words">meaning</span>')
     path = html.escape(block.clause_path) if block.clause_path else "No clause detected"
 
     with st.container(border=True):
@@ -257,7 +286,8 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: 
             f'<div class="result-head"><span class="badge badge-page">p. {html.escape(block.display_page)}</span>'
             f'{"".join(badges)}<span class="result-doc">{html.escape(res.doc_title)}</span></div>'
             f'<div class="result-path">{path}</div>'
-            f'<div class="result-body">{res.highlighted_text}</div>'
+            # A table found by meaning shows the rows that matched rather than its first cells
+            f'<div class="result-body">{table_rows_html(library, block, res.rows, ()) if res.rows else res.highlighted_text}</div>'
         )
         with st.container(horizontal=True, vertical_alignment="center"):
             if not detail:
@@ -265,6 +295,8 @@ def render_result(res, index: int, selected: bool, pin_ctx: PinContext, detail: 
                     detail = f"Matched by meaning ({res.similarity:.2f})"
                 elif res.match == "both":
                     detail = "Matched by words and meaning"
+                elif res.match == "some":
+                    detail = "Contains some of the words"
                 else:
                     detail = f"Score {res.score:.2f}"
             st.caption(f"{detail} · {res.citation}", width="stretch")

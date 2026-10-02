@@ -40,11 +40,22 @@ def current_focus(library: Library) -> Optional[TextBlock]:
 
 
 def related_for(library: Library, focus: Optional[TextBlock]) -> Dict[str, List[RelatedPassage]]:
+    """
+    What's related to the explored passage. Kept between reruns while neither the passage nor the
+    library changes: finding passages on the same topic runs the language model.
+    """
     if focus is None:
         return {}
+    # data_version changes with other connections' writes (the indexer); total_changes with this one's
+    stamp = (focus.id, library.conn.execute("PRAGMA data_version").fetchone()[0], library.conn.total_changes)
+    cached = st.session_state.get("related_cache")
+    if cached and cached[0] == stamp:
+        return cached[1]
     doc = library.get_document(focus.doc_id)
     terms = terms_in_text(glossary(library, doc), focus.text) if doc and focus.kind == "text" else []
-    return library.related_passages(focus, terms)
+    related = library.related_passages(focus, terms)
+    st.session_state["related_cache"] = (stamp, related)
+    return related
 
 
 def stop_for(block: TextBlock) -> PassageStop:
@@ -59,14 +70,15 @@ def left_pane(library: Library, render_results: Callable[[], None]) -> None:
     The choice is kept in "pane" (widget state is discarded while a tab isn't drawn).
     """
     focus = current_focus(library)
-    related = related_for(library, focus)
-    count = sum(len(items) for items in related.values())
     # The switch's state is discarded while its tab isn't drawn; restore it from "pane" when that happens
     if "pane_input" not in st.session_state:
         st.session_state["pane_input"] = st.session_state.get("pane", PANE_RESULTS)
+    # Related passages are only worked out while they're shown, so browsing results stays quick
+    related = related_for(library, focus) if st.session_state["pane_input"] == PANE_RELATED else {}
+    count = sum(len(items) for items in related.values())
     mode = st.segmented_control(
         "Show", [PANE_RESULTS, PANE_RELATED], key="pane_input", label_visibility="collapsed", width="stretch",
-        format_func=lambda m: f"Related ({count})" if m == PANE_RELATED else m,
+        format_func=lambda m: f"Related ({count})" if m == PANE_RELATED and related else m,
     ) or PANE_RESULTS  # None when the active option is clicked again
     st.session_state["pane"] = mode
     if mode == PANE_RELATED:

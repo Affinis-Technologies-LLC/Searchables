@@ -24,11 +24,11 @@ collections and search history. Run only one at a time on the same port.
 ```bash
 cd ~/GitHub/Searchables
 deploy/macos/run.sh                 # http://127.0.0.1:8501
-deploy/macos/run.sh --port 8600     # Other options are passed on to Streamlit
+deploy/macos/run.sh --port 8600
 ```
 
 The first run creates `.venv` and installs the Python packages (several minutes). Later runs start
-straight away, reinstalling only when `requirements.txt` changes.
+straight away, reinstalling only when `requirements.lock` changes.
 
 ## As a background service
 
@@ -81,10 +81,15 @@ deploy/macos/uninstall-service.sh  # Stops and removes the service; keeps the li
 
 ## Security
 
-**The app has no login.** Anyone who can open it can read every stored document and add, rename or
-delete documents. The default address `127.0.0.1` keeps it on this Mac. With `--address 0.0.0.0`,
-anyone on your network who can reach the port can use it, and macOS will ask whether Python may accept
-incoming connections. Only do that on a network where everyone is covered by your document licences.
+**The app asks for a password**, set the first time it's opened. Anyone who signs in can read every
+stored document and add, rename or delete documents. The library folder is readable by your macOS
+account only, so other accounts on this Mac can't open the stored PDFs directly; the files themselves
+aren't encrypted, so keep FileVault on.
+
+The default address `127.0.0.1` keeps the app on this Mac. With `--address 0.0.0.0`, anyone on your
+network who can reach the port gets the sign-in page, the password and every page you view travel
+unencrypted (plain HTTP), and macOS will ask whether Python may accept incoming connections. Only do
+that on a network you trust, where everyone is covered by your document licences.
 
 ## Troubleshooting
 
@@ -95,4 +100,4 @@ incoming connections. Only do that on a network where everyone is covered by you
 | Service installed but doesn't start at login | Allow it under *Login Items & Extensions* (see above) |
 | "didn't answer within 60 seconds" | `data/logs/searchables.err.log`; also check nothing else uses the port (`lsof -i :8501`) |
 | "Operation not permitted" in the logs | The project or library is in a privacy-protected folder: move it (see *Before you start*) |
-| Scanned pages aren't searchable | `brew install tesseract`, re-run the script, then **Re-index** those documents in the Library tab |
+| Scanned pages aren't searchable | `brew install tesseract`, re-run the script, then **Re-index** those documents in the Library view |

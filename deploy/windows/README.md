@@ -2,7 +2,7 @@
 
 The scripts in this folder install Searchables as a Windows service that starts with the machine,
 restarts itself if it crashes, and writes rotating logs. They use [WinSW](https://github.com/winsw/winsw),
-a small open-source service wrapper, to run Streamlit.
+a small open-source service wrapper, to run the app's server.
 
 ## Just want to try it?
 
@@ -43,7 +43,7 @@ Set-ExecutionPolicy -Scope Process Bypass   # Allows these unsigned scripts for 
 
 The script:
 
-1. creates `.venv` and installs `requirements.txt` (several minutes the first time);
+1. creates `.venv` and installs the packages pinned in `requirements.lock` (several minutes the first time);
 2. creates the data folder `C:\ProgramData\Searchables` and lets the service account write to it;
 3. finds Tesseract's language data;
 4. downloads WinSW (a pinned release from GitHub) and writes the service configuration;
@@ -69,14 +69,33 @@ Re-running the script is safe: it replaces the service and keeps the library.
 
 ## Security
 
-**The app has no login.** Anyone who can open it can read every stored standard, and can add, rename
-and delete documents. The default (`-Address 127.0.0.1`) keeps it on this machine. Before using
-`-Address 0.0.0.0 -OpenFirewall`, make sure only people covered by your standards licences can reach
-the machine, or put it behind a reverse proxy that requires sign-in (e.g. IIS with Windows
-authentication).
+**The app asks for a password**, set the first time it's opened. Anyone who signs in can read every
+stored standard, and can add, rename and delete documents. The default (`-Address 127.0.0.1`) keeps it
+on this machine. With `-Address 0.0.0.0 -OpenFirewall`, the password and every page viewed travel
+unencrypted (plain HTTP): make sure only people covered by your standards licences can reach the
+machine, or put it behind a reverse proxy that adds HTTPS (e.g. IIS).
+
+The install script limits the data folder to administrators and the service account, so other users
+of the machine can't open the stored PDFs directly. The files themselves aren't encrypted, so keep
+BitLocker on.
 
 The data folder holds your licensed PDFs. Back it up, and don't copy it anywhere your licence
 doesn't allow.
+
+## Source code folders
+
+The **Code** view reads source code from folders on this machine, as the service account
+(`LocalService` by default), which can't read folders inside a user profile (`C:\Users\…`). If adding
+a folder says it "isn't a folder this app can read", either keep the code somewhere such as
+`C:\Projects`, or give the service account read access to it:
+
+```powershell
+icacls C:\Projects\my-app /grant "*S-1-5-19:(OI)(CI)RX" /T    # S-1-5-19 is LocalService
+```
+
+Network shares need an account that can reach them: install with `-ServiceAccount NetworkService` and
+grant the machine's account access to the share. Run by hand with `run.ps1`, the app reads whatever you
+can.
 
 ## Day to day
 
@@ -98,7 +117,7 @@ git pull
 .\deploy\windows\install-service.ps1   # Picks up new requirements and restarts the service
 ```
 
-For a change that doesn't touch `requirements.txt`, `Restart-Service Searchables` is enough.
+For a change that doesn't touch `requirements.lock`, `Restart-Service Searchables` is enough.
 
 ## Moving an existing library
 
@@ -121,6 +140,6 @@ account's permissions.
 | Install stops at "Python is installed for your user only" | Reinstall Python with "Install for all users", delete `.venv`, run the script again |
 | Service starts, then stops | `Searchables.err.log` in the logs folder. Most often a missing package: re-run the install script |
 | "Access is denied" in the logs | The project or data folder isn't readable by the service account: re-run the install script, which re-applies permissions |
-| Scanned pages aren't searchable | Install Tesseract, re-run the install script, then **Re-index** the affected documents in the Library tab |
+| Scanned pages aren't searchable | Install Tesseract, re-run the install script, then **Re-index** the affected documents in the Library view |
 | Page doesn't load from another machine | The default address is `127.0.0.1`; re-run with `-Address 0.0.0.0 -OpenFirewall` |
 | Port already in use | Re-run with a different `-Port` |

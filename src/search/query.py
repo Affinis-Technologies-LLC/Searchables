@@ -5,12 +5,16 @@ from typing import List, Optional
 _TOKEN = re.compile(r'-?"[^"]*"?\*?|\S+')
 _WORD = re.compile(r"\w+")
 _OPERATORS = {"AND", "OR", "NOT"}
+# Too common to find a passage by: left out when passages need only contain some of the words
+_FILLER = set("a an the of to in on at by for from with and or is are was were be been it its this that these "
+              "those how what when where which who whom why do does did can".split())
 
 SYNTAX_HELP = """
 Plain words and questions are matched **by meaning** as well as by the words themselves, so
 *how long must calibration records be kept* finds the retention rule even if it's worded differently.
 Passages found only by meaning are marked **meaning**. Using any of the syntax below searches for
-exactly those words instead.
+exactly those words instead. When few passages contain every word, passages containing some of them
+are listed too, after those.
 
 | Type | Finds |
 |---|---|
@@ -27,11 +31,12 @@ def _phrase(words: List[str], prefix: bool = False) -> str:
     return '"' + " ".join(words) + '"' + (" *" if prefix else "")
 
 
-def build_fts_query(raw: str) -> Optional[str]:
+def build_fts_query(raw: str, any_word: bool = False) -> Optional[str]:
     """
     Supports implicit AND, "exact phrases", OR, NOT / -term and trailing * for prefixes.
     Every term is quoted, so punctuation in the input can never cause an FTS5 syntax error.
-    Returns None when nothing searchable remains.
+    Returns None when nothing searchable remains. With `any_word`, passages need only contain some
+    of the words (for plain-word searches: ranking then favours those with more and rarer ones).
     """
     positives: List[str] = []   # Terms and OR operators, in order
     negatives: List[str] = []
@@ -60,6 +65,9 @@ def build_fts_query(raw: str) -> Optional[str]:
         positives.pop()
     if not positives:
         return None
+    if any_word:
+        terms = [term for term in positives if term != "OR"]
+        return " OR ".join([t for t in terms if t.strip('"').lower() not in _FILLER] or terms)
 
     query = " ".join(positives)
     if negatives:

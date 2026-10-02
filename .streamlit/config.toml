@@ -12,3 +12,6 @@ toolbarMode = "viewer"  # Hides the Deploy button and developer menu items
 [server]
 headless = true
 enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false  # Nothing is reported to Streamlit, however the app is started

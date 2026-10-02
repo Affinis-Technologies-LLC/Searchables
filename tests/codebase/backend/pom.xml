@@ -1,0 +1,7 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <dependencyManagement><dependencies><dependency><groupId>managed</groupId><artifactId>bom</artifactId><version>1</version></dependency></dependencies></dependencyManagement>
+  <dependencies>
+    <dependency><groupId>org.springframework</groupId><artifactId>spring-web</artifactId><version>6.1.0</version></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13</version><scope>test</scope></dependency>
+  </dependencies>
+</project>

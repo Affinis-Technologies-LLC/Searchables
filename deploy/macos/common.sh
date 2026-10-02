@@ -21,7 +21,7 @@ find_python() {
     return 1
 }
 
-# Creates .venv if needed and installs requirements.txt when it has changed since the last install.
+# Creates .venv if needed and installs the locked requirements when they've changed since the last install.
 ensure_environment() {
     if [ ! -x "$VENV_PYTHON" ]; then
         local python
@@ -33,14 +33,15 @@ ensure_environment() {
     "$VENV_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
         || die "The existing .venv uses Python older than 3.10. Delete the .venv folder and run this again."
 
-    # Reinstall only when requirements.txt changes: installing is slow (PyTorch via sentence-transformers)
+    # Reinstall only when requirements.lock changes: installing is slow (PyTorch via sentence-transformers).
+    # The lock file pins every package to an exact version and hash; pip refuses anything else.
     local stamp="$APP_DIR/.venv/.requirements.sha256"
     local current
-    current="$(shasum -a 256 "$APP_DIR/requirements.txt" | cut -d' ' -f1)"
+    current="$(shasum -a 256 "$APP_DIR/requirements.lock" | cut -d' ' -f1)"
     if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$current" ]; then
         step "Installing Python packages (the first run can take several minutes)"
         "$VENV_PYTHON" -m pip install --upgrade pip --quiet
-        "$VENV_PYTHON" -m pip install -r "$APP_DIR/requirements.txt" --quiet
+        "$VENV_PYTHON" -m pip install --require-hashes -r "$APP_DIR/requirements.lock" --quiet
         echo "$current" > "$stamp"
     fi
 

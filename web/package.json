@@ -1,0 +1,27 @@
+{
+  "name": "searchables-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Browser front end for Searchables. Built into ../src/server/static, which the Python server serves.",
+  "scripts": {
+    "assets": "node scripts/copy-pdfjs.mjs",
+    "dev": "npm run assets && vite",
+    "build": "npm run assets && tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "monaco-editor": "0.52.2",
+    "pdfjs-dist": "4.10.38",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-resizable-panels": "2.1.9"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.3"
+  }
+}

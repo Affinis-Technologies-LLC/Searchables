@@ -6,9 +6,10 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src import config
 
-# "7", "7.3.2", "A.1" (annex sub-clauses need at least one dot, or "A Pump…" would match)
+# "7", "7.3.2", "A.1" (annex sub-clauses need at least one dot, or "A Pump…" would match). Large
+# military standards nest deeply ("4.1.2.3.4.5.6"), so up to ten levels are read.
 _NUMBERED_HEADING = re.compile(
-    r"^(?P<num>\d{1,2}(?:\.\d{1,3}){0,5}|[A-Z](?:\.\d{1,3}){1,5})\.?\s+(?P<title>\S.*)$"
+    r"^(?P<num>\d{1,2}(?:\.\d{1,3}){0,9}|[A-Z](?:\.\d{1,3}){1,9})\.?\s+(?P<title>\S.*)$"
 )
 _ANNEX_HEADING = re.compile(
     r"^(?P<word>Annex|ANNEX|Appendix|APPENDIX)\s+(?P<letter>[A-Z])\b[\s:.—–-]*(?P<title>.*)$"
@@ -78,6 +79,8 @@ class HeadingDetector:
 
         self._stack: List[Heading] = []
         self._top_level: Optional[int] = None
+        # Older MIL-STD appendices number their sections 10, 20, 30… ("10. SCOPE", "10.1 Purpose")
+        self._annex_tens = False
 
     @property
     def current(self) -> Optional[Heading]:
@@ -117,7 +120,6 @@ class HeadingDetector:
 
         annex = _ANNEX_HEADING.match(line)
         if annex:
-            self._top_level = None
             return Heading(level=1, num=_annex_num(annex), title=annex.group("title").strip().rstrip(".")), False
 
         match = _NUMBERED_HEADING.match(line)
@@ -143,10 +145,20 @@ class HeadingDetector:
             or not self._plausible_number(num)
         ):
             return None
-        return Heading(level=_level_of(num), num=num, title=title), has_body
+        # Sections numbered in tens sit under their appendix rather than replacing it
+        tens = num[0].isdigit() and (self._annex_tens or self._starts_tens(num))
+        level = _level_of(num) + (1 if tens else 0)
+        return Heading(level=level, num=num, title=title), has_body
 
     def _in_terms_clause(self) -> bool:
         return bool(self._stack) and bool(TERMS_CLAUSE.search(self._stack[0].title))
+
+    def _in_annex(self) -> bool:
+        return bool(self._stack) and self._stack[0].num.startswith(("Annex", "Appendix"))
+
+    def _starts_tens(self, num: str) -> bool:
+        """Whether `num` is the first section ("10" or "10.1") of an appendix numbered in tens."""
+        return self._top_level is None and self._in_annex() and num.split(".")[0] == "10"
 
     def _plausible_number(self, num: str) -> bool:
         """Clause numbers only move forward; this rejects numbered table rows and list items."""
@@ -155,14 +167,20 @@ class HeadingDetector:
             return True  # Annex sub-clause such as "A.1"
         top_value = int(top)
         if self._top_level is None:
-            return top_value <= 3  # Numbering starts at 0 (Introduction) or 1 (Scope)
+            # Numbering starts at 0 (Introduction) or 1 (Scope); in an appendix it can start at 10
+            return top_value <= 3 or self._starts_tens(num)
+        step = 10 if self._annex_tens else 1
         if "." in num:
-            return top_value in (self._top_level, self._top_level + 1)
-        return self._top_level < top_value <= self._top_level + 3
+            return top_value in (self._top_level, self._top_level + step)
+        return self._top_level < top_value <= self._top_level + 3 * step and top_value % step == 0
 
     def _push(self, heading: Heading) -> None:
-        self._stack = [h for h in self._stack if h.level < heading.level] + [heading]
         top = heading.num.split(".")[0]
+        if heading.num.startswith(("Annex", "Appendix")):
+            self._top_level, self._annex_tens = None, False  # Each annex numbers its sections afresh
+        elif top.isdigit():
+            self._annex_tens = self._annex_tens or self._starts_tens(heading.num)
+        self._stack = [h for h in self._stack if h.level < heading.level] + [heading]
         if top.isdigit():
             self._top_level = int(top)
 

@@ -83,15 +83,22 @@ def compare(old_blocks: Sequence[TextBlock], new_blocks: Sequence[TextBlock]) ->
             pairs[key] = key
 
     unpaired_old = [k for k in old if k not in pairs.values()]
+    old_words = {k: old[k].text.split() for k in unpaired_old}
+    matcher = difflib.SequenceMatcher(None, autojunk=False)
     for key, clause in new.items():
         if key in pairs or not clause.text:
             continue
-        best: Tuple[float, Optional[str]] = (0.0, None)
+        matcher.set_seq2(clause.text.split())
+        best: Tuple[float, Optional[str]] = (CONTENT_MATCH, None)
         for old_key in unpaired_old:
-            score = _ratio(old[old_key].text, clause.text)
-            if score > best[0]:
-                best = (score, old_key)
-        if best[1] and best[0] >= CONTENT_MATCH:
+            matcher.set_seq1(old_words[old_key])
+            # Every unpaired clause is tried against every other, so the two cheap upper bounds
+            # (lengths, then shared words) rule most pairs out before the full comparison
+            if matcher.real_quick_ratio() >= best[0] and matcher.quick_ratio() >= best[0]:
+                score = matcher.ratio()
+                if score > best[0] or (score == best[0] and best[1] is None):
+                    best = (score, old_key)
+        if best[1]:
             pairs[key] = best[1]
             unpaired_old.remove(best[1])
 

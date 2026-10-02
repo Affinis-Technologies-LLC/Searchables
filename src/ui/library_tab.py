@@ -7,7 +7,7 @@ import streamlit as st
 
 from src.extractor.pdf import PDFExtractor
 from src.models import Document
-from src.search.indexer import ADD, EMBED, FAILED, REINDEX, Indexer
+from src.search.indexer import ADD, CODE, EMBED, FAILED, REINDEX, Indexer
 from src.search.library import Library
 
 
@@ -114,7 +114,7 @@ def indexing_panel(indexer: Indexer) -> None:
     with st.container(border=True):
         st.markdown("**Indexing**")
         for job in active:
-            label = {ADD: "Adding", REINDEX: "Re-indexing", EMBED: "Adding meaning search to"}[job.kind]
+            label = {ADD: "Adding", REINDEX: "Re-indexing", EMBED: "Adding meaning search to", CODE: "Scanning"}[job.kind]
             if job.status == "running" and job.total:
                 st.progress(job.fraction, text=f"{label} {job.name}: {job.stage.lower()} {job.done:,} of {job.total:,}")
             elif job.status == "running":
