@@ -26,6 +26,10 @@ The app opens in your browser as a workbench, laid out like an IDE:
 - **The inspector** on the right: for a document, what the passage connects to (Related), and the
   page's text, tables, references and defined terms; for code, the symbol under the cursor.
 - **The status bar**: indexing progress, the collection pins go to, and your account.
+- **Copying:** every passage, pinned extract and code symbol has a **Copy** button, and every table a
+  **Copy table** that pastes into a spreadsheet as cells. With **Cite when copying** on (status bar), a
+  copied passage is followed by its document, clause and page, and the document's distribution
+  statement. Text can also be selected on the page itself and copied as usual.
 
 The panels can be resized by dragging the dividers, and the layout follows your system's light or dark
 setting. The address bar keeps the document, page and search in view, so a place can be bookmarked.

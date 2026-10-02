@@ -55,6 +55,9 @@ interface AppContext {
   setSymbolId: (id: number | null) => void;
   at: At | null;                // What's under the cursor in the code view, when it isn't a symbol of the codebase
   setAt: (at: At | null) => void;
+  cite: boolean;                // Whether a copied passage carries its citation (and the document's marking)
+  setCite: (cite: boolean) => void;
+  passageText: (block: Block, docTitle: string) => string;
   toasts: Toast[];
   notify: (text: string, kind?: "info" | "error") => void;
   run: <T,>(action: Promise<T>) => Promise<T | undefined>;
@@ -81,6 +84,11 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const [symbolId, setSymbolId] = useState<number | null>(null);
   const [at, setAt] = useState<At | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [cite, setCiteState] = useState(() => window.localStorage.getItem("searchables-cite") !== "off");
+  const setCite = useCallback((on: boolean) => {
+    setCiteState(on);
+    window.localStorage.setItem("searchables-cite", on ? "on" : "off");
+  }, []);
   const history = useRef<{ places: Place[]; index: number }>({ places: [], index: -1 });
   const [, setHistoryTick] = useState(0);
   const nonce = useRef(1);
@@ -204,6 +212,14 @@ export function AppProvider({ initial, children }: { initial: Overview; children
     refresh();
   }, [collectionId, notify, refresh, run]);
 
+  /** A passage as text to copy: its words, then (when citing) where it's from and the document's distribution statement. */
+  const passageText = useCallback((block: Block, docTitle: string) => {
+    if (!cite) return block.text;
+    const where = [docTitle, block.label || block.clause, `p. ${block.display_page}`].filter(Boolean).join(", ");
+    const marking = overview.documents.find((d) => d.id === block.doc_id)?.distribution;
+    return `${block.text}\n— ${where}` + (marking ? `\n${marking}` : "");
+  }, [cite, overview.documents]);
+
   const value = useMemo<AppContext>(() => ({
     overview, refresh, activity, setActivity, tabs,
     active: tabs.find((t) => t.id === activeId) ?? null,
@@ -213,8 +229,8 @@ export function AppProvider({ initial, children }: { initial: Overview; children
     canGoForward: history.current.index < history.current.places.length - 1,
     collectionId, setCollectionId, pinned, pinsVersion, togglePin, pinSymbol,
     pinsChanged: () => { setPinsVersion((n) => n + 1); refresh(); },
-    symbolId, setSymbolId, at, setAt, toasts, notify, run,
-  }), [at, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, updateDoc, step, collectionId, pinned,
+    symbolId, setSymbolId, at, setAt, cite, setCite, passageText, toasts, notify, run,
+  }), [at, cite, setCite, passageText, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, updateDoc, step, collectionId, pinned,
        pinsVersion, togglePin, pinSymbol, symbolId, toasts, notify, run]);
 
   return <Context.Provider value={value}>{children}</Context.Provider>;

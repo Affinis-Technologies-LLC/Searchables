@@ -1,5 +1,5 @@
 // Small pieces used throughout.
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 
 const ICONS: Record<string, string> = {
   search: "M10 4a6 6 0 1 0 3.9 10.6l4.3 4.3 1.4-1.4-4.3-4.3A6 6 0 0 0 10 4zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z",
@@ -22,6 +22,7 @@ const ICONS: Record<string, string> = {
   chevron: "M9 6l6 6-6 6z",
   user: "M12 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm0 10c4 0 8 2 8 5v1H4v-1c0-3 4-5 8-5z",
   download: "M11 4h2v8l3-3 1.4 1.4L12 15.8 6.6 10.4 8 9l3 3zM5 18h14v2H5z",
+  copy: "M8 3h11v13h-2V5H8zM5 7h11v14H5zm2 2v10h7V9z",
   hub: "M12 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM5 15a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm14 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm-8-7h2v4.4l4.6 2.7-1 1.7L12 14.2l-4.6 2.6-1-1.7 4.6-2.7z",
 };
 
@@ -93,10 +94,54 @@ export function Marked({ text, values }: { text: string; values: string[] }) {
   return <>{text.split(pattern).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part))}</>;
 }
 
+/** Puts text on the clipboard. Browsers only offer their clipboard to pages on this machine or over HTTPS, so there's a fallback. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const done = document.execCommand("copy");
+    area.remove();
+    return done;
+  }
+}
+
+/** A button that copies what `text` returns, and says so for a moment. */
+export function CopyButton({ text, label = "Copy", title = "Copy to the clipboard", link = false }: {
+  text: () => string | Promise<string>; label?: string; title?: string; link?: boolean;
+}) {
+  const [state, setState] = useState<"" | "done" | "failed">("");
+  const copy = async () => {
+    setState((await copyText(await text())) ? "done" : "failed");
+    setTimeout(() => setState(""), 1500);
+  };
+  return (
+    <button type="button" className={`copy ${link ? "link" : ""} ${state}`} title={title} onClick={(e) => { e.stopPropagation(); copy(); }}>
+      <Icon name="copy" size={13} /> {state === "done" ? "Copied" : state === "failed" ? "Couldn't copy" : label}
+    </button>
+  );
+}
+
+/** A table as tab-separated text: pastes into a spreadsheet as cells, and into a document as a table. */
+export function tableToTsv(table: { caption?: string; columns: string[]; rows: string[][] }): string {
+  const cell = (value: string) => value.replace(/[\t\n\r]+/g, " ");
+  return [table.columns, ...table.rows].map((row) => row.map(cell).join("\t")).join("\n");
+}
+
 export function Table({ table, highlight = [] }: { table: { caption?: string; columns: string[]; rows: string[][] }; highlight?: string[] }) {
   return (
     <div className="table-wrap">
-      {table.caption && <div className="table-caption">{table.caption}</div>}
+      <div className="table-head">
+        <span className="table-caption grow">{table.caption}</span>
+        <CopyButton link label="Copy table" title="Copy as cells, to paste into a spreadsheet or a document"
+                    text={() => (table.caption ? table.caption + "\n" : "") + tableToTsv(table)} />
+      </div>
       <table className="data">
         <thead><tr>{table.columns.map((c, i) => <th key={i}><Marked text={c} values={highlight} /></th>)}</tr></thead>
         <tbody>

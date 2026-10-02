@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useLoad } from "../hooks";
 import { useApp } from "../store";
 import { Pin } from "../types";
-import { Badge, Empty, Icon, Status, Table } from "../ui";
+import { Badge, CopyButton, Empty, Icon, Status, Table } from "../ui";
 
 /** Collections of pinned passages, tables, figures and code, with notes; exported to Word or Markdown. */
 export function CollectionsPanel() {
@@ -99,6 +99,10 @@ function PinCard({ pin }: { pin: Pin }) {
         <span className="muted grow">
           {code ? "Source code" : !pin.available ? "Document no longer in the library; text and citation kept" : pin.query ? `Found by “${pin.query}”` : ""}
         </span>
+        {!pin.table && (
+          <CopyButton title="Copy this extract"
+                      text={() => (app.cite ? `${pin.text}\n— ${pin.citation}` + (pin.marking ? `\n${pin.marking}` : "") : pin.text)} />
+        )}
         {!code && (
           <button type="button" disabled={!pin.available || pin.doc_id === null}
                   onClick={() => app.openDoc({ docId: pin.doc_id!, page: pin.page, target: pin.bbox, highlight: pin.query ? { q: pin.query } : {} })}>View page</button>

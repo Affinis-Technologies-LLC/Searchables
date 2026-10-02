@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useLoad } from "../hooks";
 import { DocTab, useApp } from "../store";
 import { Block, PageData, Related, RelatedItem } from "../types";
-import { Badge, Empty, Icon, saveText, Segments, Status, Table, tableToCsv } from "../ui";
+import { Badge, CopyButton, Empty, Icon, saveText, Segments, Status, Table, tableToCsv } from "../ui";
 import { usePage } from "./pages";
 
 const VIEWS = ["Related", "Page", "Tables", "References", "Terms"] as const;
@@ -55,6 +55,8 @@ function RelatedView({ tab, focus }: { tab: DocTab; focus: Block | null }) {
       <div className="exploring">
         <div className="grow">Exploring <strong>{name(focus)}</strong> · p. {focus.display_page}
           <div className="muted">Click a passage on the page to explore it instead.</div></div>
+        <CopyButton text={() => app.passageText(focus, app.overview.documents.find((d) => d.id === focus.doc_id)?.title ?? "")}
+                    title="Copy this passage" />
         <button type="button" className={pinned ? "on" : ""} onClick={() => app.togglePin(focus, tab.highlight.q ?? tab.highlight.identifier)}>
           <Icon name="pin" size={13} /> {pinned ? "Pinned" : "Pin"}
         </button>
@@ -105,6 +107,7 @@ function RelatedRow({ item, tab }: { item: RelatedItem; tab: DocTab }) {
       )}
       {item.findings.filter((f) => f.detail).map((f, i) => <div key={i} className="muted"><strong>{f.label}:</strong> {f.detail}</div>)}
       <p>{block.text}</p>
+      <CopyButton text={() => app.passageText(block, item.doc_title)} title="Copy this passage" />
     </details>
   );
 }

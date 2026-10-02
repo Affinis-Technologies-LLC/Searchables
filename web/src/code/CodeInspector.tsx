@@ -3,9 +3,9 @@ import { api, query } from "../api";
 import { useLoad } from "../hooks";
 import { CodeTab, useApp } from "../store";
 import { Calls, CodeSymbol, SymbolDetail, Usage } from "../types";
-import { Empty, Icon, Segments, Status } from "../ui";
+import { CopyButton, Empty, Icon, Segments, Status } from "../ui";
 import { CallTree, SymbolHead, SymbolLink, UsageRows } from "./common";
-import { useFile } from "./files";
+import { loadFile, useFile } from "./files";
 
 const VIEWS = ["Usages", "Calls", "Hierarchy", "Members", "File"] as const;
 const CERTAINTY: [Usage["certainty"], string, string][] = [
@@ -38,6 +38,10 @@ export function CodeInspector({ tab }: { tab: CodeTab }) {
             <SymbolHead symbol={symbol} />
             <div className="row">
               <button type="button" onClick={() => app.openCode({ fileId: symbol.file_id, path: symbol.path, line: symbol.line })}>Show declaration</button>
+              <CopyButton title="Copy its source" text={async () => {
+                const source = (await loadFile(symbol.file_id)).text.split("\n").slice(symbol.line - 1, symbol.end_line).join("\n");
+                return app.cite ? `${source}\n// ${symbol.path}:${symbol.line}` : source;
+              }} />
               <button type="button" onClick={() => app.pinSymbol(symbol.id)} title="Save its source to the active collection"><Icon name="pin" size={13} /> Pin</button>
             </div>
           </div>

@@ -276,3 +276,9 @@ details.related > summary::-webkit-details-marker { display: none; }
 .entry-row .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; align-self: center; }
 .entry-row .dot.off { background: transparent; border: 1px solid var(--border); }
 .changed-cell { background: var(--mark); color: var(--mark-text); }
+
+/* ---- Copying ---------------------------------------------------------------------------------- */
+button.copy.done { color: var(--ok); border-color: var(--ok); }
+button.copy.failed { color: var(--error); }
+.table-head { display: flex; align-items: baseline; gap: 8px; }
+.table-head button.copy { font-size: 11px; white-space: nowrap; flex: none; }

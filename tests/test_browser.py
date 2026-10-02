@@ -50,7 +50,9 @@ def page(url):
             browser = playwright.chromium.launch(channel="chrome", headless=True)
         except Exception as e:
             pytest.skip(f"Google Chrome isn't available to Playwright: {e}")
-        page = browser.new_context(viewport={"width": 1680, "height": 1000}).new_page()
+        context = browser.new_context(viewport={"width": 1680, "height": 1000})
+        context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page = context.new_page()
         page.set_default_timeout(30000)
         expect.set_options(timeout=30000)
         problems = []
@@ -90,6 +92,16 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     assert page.locator(".tab.on").inner_text().strip() == "BROWSER-STD-7"
     assert "#doc=" in page.url and "page=1" in page.url
 
+    # Copy the passage: its words, then where it's from
+    first.get_by_role("button", name="Copy", exact=True).click()
+    expect(first.get_by_role("button", name="Copied")).to_be_visible()
+    copied = page.evaluate("navigator.clipboard.readText()")
+    assert copied.startswith("Calibration records shall be retained") and copied.endswith("— BROWSER-STD-7, 4.2 Calibration, p. 1")
+    page.get_by_label("Cite when copying").uncheck()
+    first.get_by_role("button", name="Copy", exact=True).click()
+    expect(first.get_by_role("button", name="Copied")).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()").endswith("after the equipment is withdrawn.")
+
     # An identifier: the table row it's in, on page 2, with the table in the inspector
     page.get_by_label("Identifier", exact=True).check()
     box.fill("K3.5")
@@ -99,6 +111,10 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     page.locator(".inspector .segments button", has_text="Tables").click()
     page.wait_for_selector(".inspector table.data")
     assert "Item position update" in page.locator(".inspector table.data").first.inner_text()
+    page.locator(".inspector").get_by_role("button", name="Copy table").first.click()
+    expect(page.locator(".inspector").get_by_role("button", name="Copied").first).to_be_visible()
+    cells = page.evaluate("navigator.clipboard.readText()").split("\n")
+    assert cells[0].startswith("TABLE 1.") and cells[1] == "Message\tField\tPurpose" and cells[2].split("\t")[0] == "K3.5"
 
     # The document's contents, and stepping back to where we were
     page.locator(".activity-bar button", has_text="Contents").click()

@@ -1,7 +1,7 @@
 import { ReactNode } from "react";
 import { useApp } from "../store";
 import { Block, Term } from "../types";
-import { Badge, Icon } from "../ui";
+import { Badge, CopyButton, Icon } from "../ui";
 
 const PROVISION = { requirement: "shall", recommendation: "should", permission: "may", note: "note" };
 
@@ -34,6 +34,7 @@ export function ResultCard({ block, docTitle, selected, onOpen, children, detail
             ))}
           </details>
         )}
+        <CopyButton text={() => app.passageText(block, docTitle)} title="Copy this passage" />
         <button type="button" className={pinned ? "on" : ""} title={pinned ? "Remove from the collection" : "Save to the active collection"}
                 onClick={() => app.togglePin(block, pinQuery)}>
           <Icon name="pin" size={13} /> {pinned ? "Pinned" : "Pin"}

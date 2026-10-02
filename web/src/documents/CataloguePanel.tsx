@@ -3,7 +3,7 @@ import { api, query } from "../api";
 import { useLoad } from "../hooks";
 import { useApp } from "../store";
 import { Block, CatalogueChanges, CatalogueDetail, CatalogueEntry, Located } from "../types";
-import { Badge, Empty, Status, Table } from "../ui";
+import { Badge, CopyButton, Empty, Status, Table } from "../ui";
 
 const SHOWN = 1200;   // Rows drawn at once; a filter narrows a longer list
 
@@ -173,9 +173,12 @@ function Entry({ value, scope, onFollow }: { value: string; scope: string; onFol
         <section>
           <div className="group-title">Rules that mention it · {data.rules.length}</div>
           {data.rules.map((item) => (
-            <button key={item.block.id} type="button" className="code-row usage" onClick={() => openBlock(item.block)}>
-              <span className="where">{where(item)} · {item.block.provision}</span><span>{item.block.text.slice(0, 260)}</span>
-            </button>
+            <div key={item.block.id} className="row line">
+              <button type="button" className="code-row usage grow" onClick={() => openBlock(item.block)}>
+                <span className="where">{where(item)} · {item.block.provision}</span><span>{item.block.text.slice(0, 260)}</span>
+              </button>
+              <CopyButton label="" title="Copy this rule" text={() => app.passageText(item.block, item.doc_title)} />
+            </div>
           ))}
         </section>
       )}

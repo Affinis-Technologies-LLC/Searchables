@@ -32,6 +32,9 @@ export function StatusBar({ onSignedOut }: { onSignedOut: () => void }) {
           {overview.codebases.length} codebase{overview.codebases.length === 1 ? "" : "s"}</span>
       )}
       <span className="spacer" />
+      <label className="check" title="A copied passage is followed by its document, clause and page, and the document's distribution statement">
+        <input type="checkbox" checked={app.cite} onChange={(e) => app.setCite(e.target.checked)} /> Cite when copying
+      </label>
       <label className="status-collection" title="Pins are added to this collection">
         <Icon name="pin" size={13} /> Pin to
         <select value={app.collectionId} onChange={(e) => app.setCollectionId(Number(e.target.value))}>
