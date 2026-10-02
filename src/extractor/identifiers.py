@@ -19,8 +19,17 @@ from src.models import IdentifierFamily, IdentifierOccurrence, TableData, TextBl
 _MIXED_TOKEN = re.compile(
     r"(?<![\w.-])(?=[A-Za-z0-9._-]*\d)(?=[A-Za-z0-9._-]*[A-Za-z])[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*(?![\w-])"
 )
-# A short upper-case label, a space, then a number: FLD 2041
-_LABELLED_NUMBER = re.compile(r"(?<![\w.-])([A-Z]{2,6}) (\d{2,6})(?![\w.-])")
+# A short upper-case label, a space, then a number: FLD 2041 (a full stop ending the sentence may follow)
+_LABELLED_NUMBER = re.compile(r"(?<![\w.-])([A-Z]{2,6}) (\d{2,6})(?![\w-])(?!\.\w)")
+
+# A short label, a space, then a dotted number: "M 12.6" is the identifier "M12.6" written with a space
+_SPACED_LABEL = re.compile(r"(?<![\w.-])([A-Z]{1,3}) (\d{1,3}\.\d{1,3}[A-Z0-9]*)(?![\w-])(?!\.\w)")
+# Two labels numbered together name one thing: "GRP/ITM 1620/003", "GRP 281/ITM 001", "GRP 281, ITM 001"
+_PAIR_JOINT = re.compile(r"(?<![\w.-])([A-Z]{2,6})\s?/\s?([A-Z]{2,6}) (\d{1,6})\s?/\s?(\d{1,6})(?![\w-])(?!\.\w)")
+_PAIR_SPLIT = re.compile(r"(?<![\w.-])([A-Z]{2,6}) (\d{1,6})\s?[/,]\s?([A-Z]{2,6}) (\d{1,6})(?![\w-])(?!\.\w)")
+_PAIR_KEY = re.compile(r"^([A-Z]+)/([A-Z]+)(\d+)/(\d+)$")
+_PAIR_HEADER = re.compile(r"^([A-Z]{2,6})\s?/\s?([A-Z]{2,6})\b")
+_PAIR_CELL = re.compile(r"^(\d{1,6})\s?/\s?(\d{1,6})$")
 
 # Dot and dash look-alikes that NFKC leaves alone
 _DOTS = re.compile(r"[\u2027\u00B7\u2219\u22C5\u30FB\uFF0E]")
@@ -60,17 +69,58 @@ def find_candidates(text: str) -> List[str]:
     """Identifier-like tokens in text, in order of appearance (duplicates kept)."""
     text = normalize_text(text)
     found = []
+    taken: List[tuple] = []   # Spans already read as a pair or a spaced label: their parts aren't identifiers of their own
+    for pattern in (_PAIR_JOINT, _PAIR_SPLIT):
+        for match in pattern.finditer(text):
+            first, second = (1, 2) if pattern is _PAIR_JOINT else (1, 3)
+            numbers = (3, 4) if pattern is _PAIR_JOINT else (2, 4)
+            labels = (match.group(first), match.group(second))
+            if set(labels) & _STRUCTURAL or any(s <= match.start() < e for s, e in taken):
+                continue
+            taken.append(match.span())
+            found.append((match.start(), pair_value(*labels, match.group(numbers[0]), match.group(numbers[1]))))
+            found.append((match.start(), f"{labels[0]} {match.group(numbers[0])}"))   # Also findable by its first part
+    for match in _SPACED_LABEL.finditer(text):
+        if match.group(1) not in _STRUCTURAL and not any(s <= match.start() < e for s, e in taken):
+            taken.append(match.span())
+            found.append((match.start(), match.group(0)))
     for match in _MIXED_TOKEN.finditer(text):
         value = match.group(0)
-        if _MEASUREMENT.match(value) or _APPENDIX_CLAUSE.match(value):
+        if _MEASUREMENT.match(value) or _APPENDIX_CLAUSE.match(value) or any(s <= match.start() < e for s, e in taken):
             continue
         if re.split(r"[._-]", value.upper())[0].rstrip("0123456789") in _STRUCTURAL:
             continue  # "Table12", "FIG-3"
         found.append((match.start(), value))
     for match in _LABELLED_NUMBER.finditer(text):
-        if match.group(1) not in _STRUCTURAL:
+        if match.group(1) not in _STRUCTURAL and not any(s <= match.start() < e for s, e in taken):
             found.append((match.start(), f"{match.group(1)} {match.group(2)}"))
-    return [value for _, value in sorted(found)]
+    return [value for _, value in sorted(found, key=lambda item: item[0])]
+
+
+def pair_value(first: str, second: str, number: str, other: str) -> str:
+    """How a pair of numbered labels is written, whichever way the text put it: "GRP/ITM 281/001"."""
+    return f"{first}/{second} {number}/{other}"
+
+
+def labelled_cells(columns: Sequence[str], row: Sequence[str], labels: set, pairs: set) -> List[str]:
+    """
+    Identifiers a table row gives through its column headings: a bare number under a heading that's
+    used as an identifier label elsewhere in the document ("GRP" over "281"), and number pairs under
+    a joint heading ("GRP/ITM" over "281/001") or under two neighbouring headings known as a pair.
+    """
+    found: List[str] = []
+    heads = [normalize_text(c).upper().strip() for c in columns]
+    cells = [normalize_text(c).strip() for c in row]
+    for i, (head, cell) in enumerate(zip(heads, cells)):
+        joint, split = _PAIR_HEADER.match(head), _PAIR_CELL.match(cell)
+        if joint and split and not set(joint.groups()) & _STRUCTURAL:
+            found += [pair_value(joint.group(1), joint.group(2), *split.groups()), f"{joint.group(1)} {split.group(1)}"]
+        elif head in labels and re.fullmatch(r"\d{1,6}", cell):
+            found.append(f"{head} {cell}")
+            following = heads[i + 1] if i + 1 < len(heads) else ""
+            if (head, following) in pairs and i + 1 < len(cells) and re.fullmatch(r"\d{1,6}", cells[i + 1]):
+                found.append(pair_value(head, following, cell, cells[i + 1]))
+    return found
 
 
 def extract_occurrences(blocks: Sequence[TextBlock], tables: Sequence[TableData]) -> List[IdentifierOccurrence]:
@@ -81,6 +131,16 @@ def extract_occurrences(blocks: Sequence[TextBlock], tables: Sequence[TableData]
     """
     table_by_block = {t.block_id: t for t in tables}
     occurrences: List[IdentifierOccurrence] = []
+    # Labels the document numbers things by ("GRP 281"), and pairs of them: these give meaning to bare
+    # numbers under the same headings in tables
+    labels, pairs = set(), set()
+    for block in blocks:
+        text = normalize_text(block.text)
+        labels.update(m.group(1) for m in _LABELLED_NUMBER.finditer(text) if m.group(1) not in _STRUCTURAL)
+        for pattern, second in ((_PAIR_JOINT, 2), (_PAIR_SPLIT, 3)):
+            for m in pattern.finditer(text):
+                labels.add(m.group(1))
+                pairs.add((m.group(1), m.group(second)))
 
     def add(block: TextBlock, text: str, role: str, row: Optional[int] = None) -> None:
         occurrences.extend(
@@ -97,6 +157,12 @@ def extract_occurrences(blocks: Sequence[TextBlock], tables: Sequence[TableData]
             add(block, caption, "caption")
             for index, row in enumerate([table.columns, *table.rows]):
                 add(block, " ".join(row), "table", index)
+                if index:
+                    occurrences.extend(
+                        IdentifierOccurrence(block_id=block.id, value=value, key=identifier_key(value),
+                                             family=family_of(value), role="table", row=index)
+                        for value in labelled_cells(table.columns, row, labels, pairs)
+                    )
         elif block.kind == "heading":
             add(block, block.text, "heading")
         elif block.kind == "figure":
@@ -156,4 +222,7 @@ def parent_key(key: str, known: set) -> Optional[str]:
         candidate = key[:end]
         if candidate in known and not (candidate[-1].isdigit() and key[end].isdigit()):
             return candidate
+    pair = _PAIR_KEY.match(key)   # "GRP/ITM 281/001" belongs to "GRP 281"
+    if pair and pair.group(1) + pair.group(3) in known:
+        return pair.group(1) + pair.group(3)
     return None

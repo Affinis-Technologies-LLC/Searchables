@@ -143,6 +143,7 @@ export function PdfView({ tab, visible }: { tab: DocTab; visible: boolean }) {
           </>
         )}
         <span className="grow" />
+        {doc.distribution && <span className="badge badge-marking" title={doc.distribution}>{doc.distribution.split(".")[0]}</span>}
         <Segments options={ZOOMS} value={zoom} onChange={setZoom} />
       </div>
       <Status loading={loading && !data} error={failed || error} />

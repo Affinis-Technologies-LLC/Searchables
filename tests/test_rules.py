@@ -36,7 +36,7 @@ def test_assess_values_strength_and_conflict():
 
 
 def test_assess_uses_a_list_items_inherited_provision():
-    pairs = [("Transmit a drop track report.", "The terminal should transmit a drop track report.", 0.95)]
+    pairs = [("Transmit a drop item report.", "The terminal should transmit a drop item report.", 0.95)]
     assert assess(pairs)[0] == []
     assert labels(assess(pairs, focus_provision="requirement")[0]) == [("Weaker requirement", "shall → should")]
 
@@ -74,9 +74,9 @@ def block(i, text, kind="text"):
 def test_list_items_inherit_the_lead_ins_provision():
     blocks = inherit_list_provisions([
         block(0, "The terminal shall perform the following:"),
-        block(1, "a. Transmit a drop track report."),
+        block(1, "a. Transmit a drop item report."),
         block(2, "(2) Cease reporting; the operator may override this."),
-        block(3, "• Retain the track number."),
+        block(3, "• Retain the reference number."),
         block(4, "The display is described in the next clause."),
         block(5, "a. Not part of any list."),
         block(6, "Background: the following apply."),

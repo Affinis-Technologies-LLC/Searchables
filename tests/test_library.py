@@ -79,7 +79,7 @@ def test_a_question_finds_passages_with_some_of_its_words(library, doc):
 
 def test_many_exact_matches_are_not_padded_with_partial_ones(library, doc, monkeypatch):
     monkeypatch.setattr(config, "PARTIAL_MATCH_BELOW", 1)
-    results, _ = library.search("track report", use_meaning=False)
+    results, _ = library.search("item report", use_meaning=False)
     assert results and all(r.match == "keyword" for r in results)
 
 

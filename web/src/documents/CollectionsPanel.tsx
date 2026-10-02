@@ -91,6 +91,7 @@ function PinCard({ pin }: { pin: Pin }) {
       <div className="card-body">
         {pin.table ? <Table table={pin.table} /> : code ? <pre className="code">{pin.text}</pre> : <blockquote>{pin.text}</blockquote>}
       </div>
+      {pin.marking && <div className="marking" title="The distribution statement of the document this comes from">{pin.marking}</div>}
       <textarea value={note} placeholder="Why this matters, open questions…" aria-label="Note"
                 onChange={(e) => setNote(e.target.value)}
                 onBlur={() => { if (note !== pin.note) app.run(api.patch(`/pins/${pin.id}`, { note })); }} />

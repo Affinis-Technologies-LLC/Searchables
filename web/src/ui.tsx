@@ -4,6 +4,7 @@ import { ReactNode } from "react";
 const ICONS: Record<string, string> = {
   search: "M10 4a6 6 0 1 0 3.9 10.6l4.3 4.3 1.4-1.4-4.3-4.3A6 6 0 0 0 10 4zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z",
   contents: "M4 5h16v2H4zm0 6h10v2H4zm0 6h16v2H4zm13-7 3 2-3 2z",
+  catalogue: "M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 2h7v2h-7zm0 3h5v2h-5z",
   glossary: "M5 3h12a2 2 0 0 1 2 2v16l-4-2-4 2-4-2-4 2V5a2 2 0 0 1 2-2zm2 4v2h8V7zm0 4v2h8v-2z",
   compare: "M3 4h8v16H3zm2 2v12h4V6zm8-2h8v16h-8zm2 2v12h4V6z",
   collections: "M14 4l6 6-4 1-3 3 1 5-5-5-5 5 5-5-5-5 5 1 3-3z",

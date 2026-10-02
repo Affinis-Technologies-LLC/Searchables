@@ -264,3 +264,15 @@ details.related > summary::-webkit-details-marker { display: none; }
 .tree-row .grow { overflow: hidden; text-overflow: ellipsis; }
 .twist { display: inline-flex; transition: transform 0.1s; }
 .twist.open { transform: rotate(90deg); }
+
+/* ---- Catalogue, markings ---------------------------------------------------------------------- */
+.marking { font-size: 11px; color: var(--muted); border-left: 3px solid #b45309; padding-left: 6px; margin-top: 6px; }
+.badge-marking { background: #b45309; color: #fff; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.expanded { margin: -4px 0 8px; font-size: 12px; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.record { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; font-size: 12px; margin: 4px 0; }
+.record dt { color: var(--muted); }
+.record dd { margin: 0; overflow-wrap: anywhere; }
+.entry-row .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; align-self: center; }
+.entry-row .dot.off { background: transparent; border: 1px solid var(--border); }
+.changed-cell { background: var(--mark); color: var(--mark-text); }

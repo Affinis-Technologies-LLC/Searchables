@@ -13,8 +13,15 @@ def _md_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def _markings(pins: List[Pin]) -> List[str]:
+    """The distinct distribution statements of the documents the extracts come from."""
+    return list(dict.fromkeys(pin.marking for pin in pins if pin.marking))
+
+
 def to_markdown(collection_name: str, pins: List[Pin]) -> str:
     lines = [f"# {collection_name}", "", f"_Exported {date.today().isoformat()} · {len(pins)} items_", ""]
+    if markings := _markings(pins):
+        lines += ["**This extract contains material from documents marked:**", ""] + [f"- {m}" for m in markings] + [""]
     for i, pin in enumerate(pins, 1):
         lines += [f"## {i}. {pin.citation}", ""]
         if pin.table:
@@ -29,6 +36,8 @@ def to_markdown(collection_name: str, pins: List[Pin]) -> str:
         else:
             lines.append(f"> {pin.text}")
         lines.append("")
+        if pin.marking:
+            lines += [f"_{pin.marking}_", ""]
         if pin.note:
             lines += [f"**Note:** {pin.note}", ""]
         if pin.query:
@@ -40,6 +49,10 @@ def to_docx(collection_name: str, pins: List[Pin]) -> bytes:
     doc = WordDocument()
     doc.add_heading(collection_name, level=0)
     doc.add_paragraph(f"Exported {date.today().isoformat()} · {len(pins)} items")
+    if markings := _markings(pins):
+        doc.add_paragraph().add_run("This extract contains material from documents marked:").bold = True
+        for marking in markings:
+            doc.add_paragraph(marking, style="List Bullet")
 
     for i, pin in enumerate(pins, 1):
         doc.add_heading(f"{i}. {pin.citation}", level=2)
@@ -61,6 +74,9 @@ def to_docx(collection_name: str, pins: List[Pin]) -> bytes:
             code.font.name, code.font.size = "Consolas", Pt(9)
         else:
             doc.add_paragraph(pin.text, style="Quote")
+        if pin.marking:
+            marked = doc.add_paragraph().add_run(pin.marking)
+            marked.italic, marked.font.size = True, Pt(8)
         if pin.note:
             note = doc.add_paragraph()
             note.add_run("Note: ").bold = True

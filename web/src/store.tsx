@@ -3,7 +3,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { api } from "./api";
 import { At, BBox, Block, Overview } from "./types";
 
-export type Activity = "search" | "contents" | "glossary" | "compare" | "collections" | "library" | "code";
+export type Activity = "search" | "contents" | "catalogue" | "glossary" | "compare" | "collections" | "library" | "code";
 
 /** What a document tab highlights: the words of a search, or an identifier. */
 export interface Highlight { q?: string; identifier?: string; children?: boolean }

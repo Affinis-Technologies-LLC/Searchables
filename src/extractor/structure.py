@@ -22,6 +22,12 @@ _RUN_IN_END = re.compile(r"\.(?=\s|$)")
 # Headings name topics; a numbered sentence with a verbal form is a requirement or list item
 _PROVISION_WORDS = re.compile(r"\b(?:shall|should|must|may|will|can)\b", re.IGNORECASE)
 TERMS_CLAUSE = re.compile(r"terms|definitions|abbreviations|symbols", re.IGNORECASE)
+# A clause that lists acronyms: its lines are kept apart, since each is an entry
+ACRONYMS_CLAUSE = re.compile(r"^(?:list of )?(?:acronyms?|abbreviations?)\b", re.IGNORECASE)
+# A page number as printed in a header or footer: "23", "iv", "4-123", "B-45", "4.11-23", "Page 12 of 40"
+_PAGE_NUMBER = re.compile(
+    r"^(?:[Pp]age\s+)?((?:[A-Z]{1,3}[-.])?\d{1,4}(?:[-.]\d{1,4}){0,2}|[ivxlcdm]{1,7})(?:\s+of\s+\d+)?$"
+)
 
 
 def _annex_num(match: re.Match) -> str:
@@ -79,7 +85,7 @@ class HeadingDetector:
 
         self._stack: List[Heading] = []
         self._top_level: Optional[int] = None
-        # Older MIL-STD appendices number their sections 10, 20, 30… ("10. SCOPE", "10.1 Purpose")
+        # Older military-standard appendices number their sections 10, 20, 30… ("10. SCOPE", "10.1 Purpose")
         self._annex_tens = False
 
     @property
@@ -217,3 +223,37 @@ def is_running_text(block: tuple, height: float, running_keys: Set[str]) -> bool
     band = height * config.MARGIN_FRACTION
     in_margin = block[3] <= band or block[1] >= height - band
     return in_margin and _margin_key(block[4]) in running_keys
+
+
+def find_page_labels(pages: Iterable[Tuple[int, float, List[tuple]]]) -> Dict[int, str]:
+    """
+    Page numbers as printed ("4-123", "B-45", "iv"), read from the header or footer, for PDFs that
+    don't carry page labels of their own. Each page is (page number, page height, raw PyMuPDF
+    blocks). Returns {} unless most pages have one: citations then use the physical page number.
+    """
+    found: Dict[str, Dict[int, List[str]]] = {"top": {}, "bottom": {}}
+    seen: Counter = Counter()
+    count = 0
+    for number, height, blocks in pages:
+        count += 1
+        band = height * config.MARGIN_FRACTION
+        for block in blocks:
+            where = "top" if block[3] <= band else "bottom" if block[1] >= height - band else None
+            if block[6] != 0 or where is None:
+                continue
+            for line in block[4].splitlines():
+                match = _PAGE_NUMBER.match(" ".join(line.split()))
+                if match:
+                    found[where].setdefault(number, []).append(match.group(1))
+        seen.update({n for band_found in found.values() for n in band_found.get(number, [])})
+    if count < config.MIN_PAGES_FOR_REPEAT:
+        return {}
+    # A number printed on many pages is something else (a document number, a year)
+    constant = {n for n, pages_with in seen.items() if pages_with > max(2, 0.2 * count)}
+    labels = {
+        where: {number: next(n for n in numbers if n not in constant)
+                for number, numbers in by_page.items() if any(n not in constant for n in numbers)}
+        for where, by_page in found.items()
+    }
+    best = max(labels.values(), key=len)
+    return best if len(best) >= config.REPEAT_FRACTION * count else {}

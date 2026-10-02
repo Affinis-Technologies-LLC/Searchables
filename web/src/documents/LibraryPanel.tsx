@@ -2,7 +2,7 @@ import { DragEvent, useRef, useState } from "react";
 import { api } from "../api";
 import { useLoad } from "../hooks";
 import { useApp } from "../store";
-import { DocumentInfo, IdentifierFamily, Job } from "../types";
+import { DocumentInfo, HealthCheck, IdentifierFamily, Job } from "../types";
 import { Empty, Icon, Status } from "../ui";
 
 const JOB_LABEL = { add: "Adding", reindex: "Re-indexing", embed: "Adding meaning search to", code: "Scanning" };
@@ -134,6 +134,7 @@ function DocumentRow({ doc, expanded, onToggle, onQueue }: {
       {expanded && (
         <div className="manage">
           <div className="muted">{doc.filename} · added {doc.added_at.replace("T", " ")}</div>
+          {doc.distribution && <div className="marking">{doc.distribution}</div>}
           <div className="row">
             <input className="grow" value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Title" />
             <button type="button" disabled={!title.trim() || title.trim() === doc.title} onClick={rename}>Save title</button>
@@ -143,10 +144,36 @@ function DocumentRow({ doc, expanded, onToggle, onQueue }: {
                     title="Re-extract from the stored PDF (runs in the background)"><Icon name="refresh" size={13} /> Re-index</button>
             <button type="button" disabled={doc.busy} onClick={remove}><Icon name="trash" size={13} /> Delete…</button>
           </div>
+          <Health doc={doc} />
           <Families doc={doc} />
         </div>
       )}
     </article>
+  );
+}
+
+/** How well the document was read: what to look over before relying on searches of it. */
+function Health({ doc }: { doc: DocumentInfo }) {
+  const { data, loading, error } = useLoad<HealthCheck[]>(() => api.get(`/documents/${doc.id}/health`), [doc.id, doc.block_count, doc.meaning]);
+  const warnings = data?.filter((c) => c.warn).length ?? 0;
+  return (
+    <>
+      <div className="group-title">How well it was read{data ? (warnings ? ` · ${warnings} to look at` : " · nothing to look at") : ""}</div>
+      <Status loading={loading && !data} error={error} />
+      {data && (
+        <div className="table-wrap">
+          <table className="data">
+            <tbody>
+              {data.map((check) => (
+                <tr key={check.name} className={check.warn ? "warn" : ""}>
+                  <td>{check.warn ? "⚠ " : ""}{check.name}</td><td>{check.value}</td><td>{check.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

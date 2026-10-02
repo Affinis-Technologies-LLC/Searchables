@@ -31,7 +31,7 @@ export function SearchPanel() {
     provisions: provisions.map((name) => overview.provisions[name]),
   }), [docs, content, provisions, overview.content_kinds, overview.provisions]);
 
-  const words = useLoad<{ total: number; by_meaning: boolean; results: SearchResult[] }>(
+  const words = useLoad<{ total: number; by_meaning: boolean; expanded: { acronym: string; meaning: string }[]; results: SearchResult[] }>(
     () => (submitted && !submitted.identifier
       ? api.get(`/search` + queryString({ q: submitted.text, ...scope, order: order === "Position" ? "document" : undefined, limit }))
       : null),
@@ -171,6 +171,11 @@ export function SearchPanel() {
               <span>Showing <strong>{words.data.results.length}</strong> of <strong>{words.data.total}</strong> matching passages</span>
               {words.data.results.length > 0 && <button type="button" className="link" onClick={download}>CSV</button>}
             </div>
+            {words.data.expanded.length > 0 && (
+              <div className="muted expanded" title="From the documents' lists of acronyms. The meaning search uses the spelled-out form too.">
+                Also searched: {words.data.expanded.map((e) => `${e.acronym} = ${e.meaning}`).join("; ")}
+              </div>
+            )}
             {!words.data.results.length && (
               <div className="notice">No passages match. Try fewer words, a prefix like <code>calib*</code>, OR between
                 alternatives, or fewer filters.</div>

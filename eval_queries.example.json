@@ -8,7 +8,7 @@
     "expect": [{"document": "ISO 4126-1", "page": 12}]
   },
   {
-    "query": "track number reporting responsibility",
-    "expect": [{"clause": "4.3.2"}, {"text": "reporting responsibility for the track"}]
+    "query": "reference number reporting responsibility",
+    "expect": [{"clause": "4.3.2"}, {"text": "reporting responsibility for the item"}]
   }
 ]

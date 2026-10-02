@@ -48,6 +48,10 @@ class CollectionStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
         self.conn.executescript(_SCHEMA)
+        # Added after the first release: the document's distribution statement, kept with each pin
+        if "marking" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(pins)")}:
+            self.conn.execute("ALTER TABLE pins ADD COLUMN marking TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
 
     # ---- Collections -----------------------------------------------------------------------
 
@@ -101,18 +105,19 @@ class CollectionStore:
         citation: str,
         query: str = "",
         table: Optional[dict] = None,
+        marking: str = "",
     ) -> None:
         """Pins a block, copying what's needed to cite and export it. Pinning twice is a no-op."""
         x0, y0, x1, y1 = block.bbox or (None, None, None, None)
         with self.conn:
             self.conn.execute(
                 "INSERT OR IGNORE INTO pins (collection_id, doc_id, pin_key, doc_title, page, page_label, kind, "
-                "label, clause, citation, text, query, added_at, x0, y0, x1, y1, table_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "label, clause, citation, text, query, added_at, x0, y0, x1, y1, table_json, marking) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (collection_id, block.doc_id, pin_key(block), doc_title, block.page, block.display_page,
                  block.kind, block.label, block.clause, citation, block.text, query.strip(),
                  datetime.now().isoformat(timespec="seconds"), x0, y0, x1, y1,
-                 json.dumps(table) if table else None),
+                 json.dumps(table) if table else None, marking),
             )
 
     def remove_pin_for(self, collection_id: int, block: TextBlock) -> None:
@@ -149,6 +154,7 @@ class CollectionStore:
                 query=row["query"], added_at=row["added_at"],
                 bbox=(row["x0"], row["y0"], row["x1"], row["y1"]) if row["x0"] is not None else None,
                 table=json.loads(row["table_json"]) if row["table_json"] else None,
+                marking=row["marking"],
             )
             for row in rows
         ]

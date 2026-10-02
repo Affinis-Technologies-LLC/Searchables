@@ -8,7 +8,8 @@ from src import config
 from src.extractor.identifiers import extract_occurrences
 from src.extractor.objects import PageFigure, PageTable, find_figures, find_tables, find_xrefs, parse_caption
 from src.extractor.provisions import classify_provision, inherit_list_provisions
-from src.extractor.structure import HeadingDetector, find_running_text, is_running_text
+from src.extractor.structure import (ACRONYMS_CLAUSE, HeadingDetector, find_page_labels, find_running_text,
+                                     is_running_text)
 from src.models import CrossRef, ExtractedDocument, TableData, TextBlock
 
 # Omitting TEXT_PRESERVE_LIGATURES expands ligatures ("ﬁ" → "fi") so search matches them
@@ -16,6 +17,10 @@ _TEXT_FLAGS = pymupdf.TEXT_MEDIABOX_CLIP
 # "require-\nments" → "requirements". PyMuPDF's TEXT_DEHYPHENATE has no effect on "blocks" output.
 # Lowercase on both sides only, so "ISO-\n9001" and "Type-\nA" keep their hyphen.
 _LINE_END_HYPHEN = re.compile(r"(?<=[a-z])-\n(?=[a-z])")
+
+# "DISTRIBUTION STATEMENT A. Approved for public release…": the statement and the lines that finish it
+_DISTRIBUTION = re.compile(r"DISTRIBUTION\s+STATEMENT\s+[A-FX]\b.*", re.IGNORECASE | re.DOTALL)
+_DISTRIBUTION_CHARS = 400
 
 ProgressCallback = Callable[[int, int], None]
 
@@ -74,6 +79,7 @@ class PDFExtractor:
             raise ValueError(f"Failed to open PDF document: {e}") from e
 
         # Context manager closes the document even if extraction fails partway
+        self._headings: dict = {}   # Table label → its heading row, for continuations that don't repeat it
         with doc:
             result = ExtractedDocument(title=Path(filename).stem, page_count=len(doc))
             pages = self._read_pages(doc, result, on_progress)
@@ -124,9 +130,19 @@ class PDFExtractor:
                 data.tables = find_tables(page, blocks)
                 data.figures = find_figures(page, blocks, [t.bbox for t in data.tables])
 
+            if not result.distribution:
+                for b in data.blocks:
+                    found = _DISTRIBUTION.search(b[4]) if b[6] == 0 else None
+                    if found:
+                        result.distribution = " ".join(found.group(0).split())[:_DISTRIBUTION_CHARS]
+                        break
             pages.append(data)
             if on_progress:
                 on_progress(page_no, len(doc))
+        if not any(p.label for p in pages):   # The PDF names no pages itself: use the numbers printed on them
+            printed = find_page_labels((p.number, p.height, p.blocks) for p in pages)
+            for p in pages:
+                p.label = printed.get(p.number, "")
         return pages
 
     def _emit_page(
@@ -169,6 +185,13 @@ class PDFExtractor:
         bbox = pymupdf.Rect(table.bbox)
         if caption_block:
             bbox |= pymupdf.Rect(caption_block[:4])
+        if caption:
+            # A continuation ("TABLE 5.1-2 - Continued") often starts straight in with data: it takes the
+            # heading row of the table it continues, so its first row isn't mistaken for one
+            first = self._headings.setdefault(caption.label, table.columns)
+            if first is not table.columns and len(first) == len(table.columns) \
+                    and [c.lower() for c in first] != [c.lower() for c in table.columns]:
+                table = PageTable(table.bbox, first, [table.columns, *table.rows], table.caption_index)
         cells = " ".join(" ".join(row) for row in [table.columns, *table.rows])
         block = self._object_block("table", caption.label if caption else "", f"{caption_text} {cells}".strip(),
                                    tuple(bbox), page, detector, len(result.blocks))
@@ -210,9 +233,16 @@ class PDFExtractor:
         raw_text = _LINE_END_HYPHEN.sub("", b[4].strip())
         _, heading_only = detector.feed(page.number, raw_text)
         clean_text = " ".join(raw_text.split())
+        # In a list of acronyms each line is an entry, and an entry can be very short ("RN"): the
+        # lines are kept apart and nothing is dropped for being short
+        listing = bool(detector.current and ACRONYMS_CLAUSE.search(detector.current.title)) and not heading_only
+        if listing:
+            clean_text = "\n".join(" ".join(line.split()) for line in raw_text.splitlines() if line.strip())
 
         # Skip single page numbers, short artifacts, or empty lines (headings are kept for navigation)
-        if not heading_only and (len(clean_text) < self.min_char_length or clean_text.isdigit()):
+        if not heading_only and not listing and (len(clean_text) < self.min_char_length or clean_text.isdigit()):
+            return None
+        if not clean_text:
             return None
 
         current = detector.current

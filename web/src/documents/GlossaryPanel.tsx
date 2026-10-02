@@ -3,9 +3,9 @@ import { api } from "../api";
 import { useLoad } from "../hooks";
 import { useApp } from "../store";
 import { Term } from "../types";
-import { Empty, Status } from "../ui";
+import { Badge, Empty, Status } from "../ui";
 
-/** Terms and definitions read from a document's "Terms and definitions" clause. */
+/** Terms and definitions read from a document's "Terms and definitions" clause, and its list of acronyms. */
 export function GlossaryPanel() {
   const app = useApp();
   const { documents } = app.overview;
@@ -34,12 +34,14 @@ export function GlossaryPanel() {
       </div>
       <div className="panel-body">
         <Status loading={loading} error={error} />
-        {data && !data.length && <Empty>No “Terms and definitions” clause with numbered entries was found in this document.</Empty>}
-        {data && data.length > 0 && <div className="summary"><span>{terms.length} of {data.length} terms</span></div>}
+        {data && !data.length && <Empty>No “Terms and definitions” clause with numbered entries, and no list of acronyms, was found in this document.</Empty>}
+        {data && data.length > 0 && (
+          <div className="summary"><span>{terms.length} of {data.length} entries · {data.filter((t) => t.acronym).length} acronyms</span></div>
+        )}
         {terms.map((term) => (
           <article key={term.clause_num + term.term} className="card"
                    onClick={() => app.openDoc({ docId: term.doc_id, page: term.page, target: term.bbox })}>
-            <header><span className="card-title">{term.term}</span><span className="muted">{term.clause_num}</span></header>
+            <header>{term.acronym && <Badge>acronym</Badge>}<span className="card-title">{term.term}</span><span className="muted">{term.clause_num}</span></header>
             {term.synonyms.length > 0 && <div className="card-path">also: {term.synonyms.join(", ")}</div>}
             <div className="card-body">{term.definition}</div>
           </article>

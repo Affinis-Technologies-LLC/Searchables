@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src import config
-from src.extractor.identifiers import family_of, identifier_key, normalize_text, parent_key, summarize_families
+from src.extractor.identifiers import (family_of, find_candidates, identifier_key, normalize_text, parent_key,
+                                       summarize_families)
 from src.extractor.objects import parse_caption, standard_pattern
 from src.extractor.pdf import PDFExtractor
 from src.research.assess import assess
@@ -94,7 +95,8 @@ CREATE TABLE IF NOT EXISTS documents (
     added_at        TEXT NOT NULL,
     extract_version INTEGER NOT NULL DEFAULT 1,
     embedding_model TEXT NOT NULL DEFAULT '',
-    embedding_started TEXT NOT NULL DEFAULT ''
+    embedding_started TEXT NOT NULL DEFAULT '',
+    distribution    TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS blocks (
     id           INTEGER PRIMARY KEY,
@@ -197,7 +199,7 @@ CREATE TABLE IF NOT EXISTS search_history (
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS won't add them to an existing library
 _ADDED_COLUMNS = {
     "documents": [("extract_version", "INTEGER NOT NULL DEFAULT 1"), ("embedding_model", "TEXT NOT NULL DEFAULT ''"),
-                  ("embedding_started", "TEXT NOT NULL DEFAULT ''")],
+                  ("embedding_started", "TEXT NOT NULL DEFAULT ''"), ("distribution", "TEXT NOT NULL DEFAULT ''")],
     "blocks": [("label", "TEXT NOT NULL DEFAULT ''"), ("provision", "TEXT NOT NULL DEFAULT ''")],
 }
 
@@ -290,9 +292,10 @@ class Library:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO documents (title, filename, sha256, page_count, block_count, ocr_pages, added_at, "
-                "extract_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "extract_version, distribution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (extracted.title, filename, sha256, extracted.page_count, len(extracted.blocks),
-                 len(extracted.ocr_pages), datetime.now().isoformat(timespec="seconds"), config.EXTRACTOR_VERSION),
+                 len(extracted.ocr_pages), datetime.now().isoformat(timespec="seconds"), config.EXTRACTOR_VERSION,
+                 extracted.distribution),
             )
             self._store_extraction(cur.lastrowid, extracted)
         self._embed_if_possible(cur.lastrowid, on_progress)
@@ -317,8 +320,9 @@ class Library:
             self._delete_index(doc_id)
             self.conn.execute(
                 "UPDATE documents SET page_count = ?, block_count = ?, ocr_pages = ?, extract_version = ?, "
-                "embedding_model = '', embedding_started = '' WHERE id = ?",
-                (extracted.page_count, len(extracted.blocks), len(extracted.ocr_pages), config.EXTRACTOR_VERSION, doc_id),
+                "embedding_model = '', embedding_started = '', distribution = ? WHERE id = ?",
+                (extracted.page_count, len(extracted.blocks), len(extracted.ocr_pages), config.EXTRACTOR_VERSION,
+                 extracted.distribution, doc_id),
             )
             self._store_extraction(doc_id, extracted)
         self._embed_if_possible(doc_id, on_progress)
@@ -575,8 +579,9 @@ class Library:
         if not include_children:
             return [key]
         where, params = self._scope(doc_ids)
+        # Those that begin with it, and pairs it's the first part of ("GRP 281" → "GRP/ITM 281/001")
         rows = self.conn.execute(
-            f"SELECT DISTINCT o.key FROM identifier_occurrences o WHERE o.key LIKE ? {where}",
+            f"SELECT DISTINCT o.key FROM identifier_occurrences o WHERE (o.key LIKE ? OR o.key LIKE '%/%') {where}",
             [key.replace("%", "").replace("_", "") + "%", *params],
         ).fetchall()
         return [key] + [r[0] for r in rows if r[0] != key and parent_key(r[0], {key}) == key]
@@ -629,7 +634,7 @@ class Library:
         """
         The code found in the text itself, when it isn't among the discovered identifiers: its pattern
         is switched off, the document predates identifier discovery, or the PDF writes it oddly
-        ("J2 .0", "J2·0"). Any punctuation or spacing is allowed between its letter and digit groups.
+        ("K2 .0", "K2·0"). Any punctuation or spacing is allowed between its letter and digit groups.
         """
         parts = re.findall(r"[A-Za-z]+|\d+", normalize_text(text))
         if not parts:
@@ -790,13 +795,16 @@ class Library:
         kinds: Optional[Sequence[str]] = None,
         provisions: Optional[Sequence[str]] = None,
         use_meaning: bool = True,
+        expanded: str = "",
     ) -> Tuple[List[SearchResult], int]:
         """
         Returns (results, total_matches). Relevance order uses BM25; document order lists hits
         as they appear (by document, then position) for reading through every mention.
         `kinds` limits results to block kinds ("text", "heading", "table", "figure"); `provisions`
         to passages classified as "requirement", "recommendation", "permission" or "note".
-        `use_meaning=False` searches by words alone (for measuring what meaning adds).
+        `use_meaning=False` searches by words alone (for measuring what meaning adds). `expanded` is
+        the query with its acronyms spelled out (or the reverse): the meaning search, and the search
+        for passages with only some of the words, use it, since the model doesn't know the acronyms.
         Raises ValueError when the query has nothing searchable.
         """
         fts_query = build_fts_query(query_text)
@@ -810,7 +818,7 @@ class Library:
             params,
         ).fetchone()[0]
 
-        meaning = self._meaning_matches(query_text, doc_ids, kinds, provisions) if plain and use_meaning else []
+        meaning = self._meaning_matches(expanded or query_text, doc_ids, kinds, provisions) if plain and use_meaning else []
         # Keyword rows in relevance order; deeper when they'll be merged with meaning matches
         depth = max(limit, config.FUSION_DEPTH) if meaning else limit
         keyword_rows = self._keyword_rows(where, params, "d.title COLLATE NOCASE, b.seq" if document_order and not meaning
@@ -818,7 +826,7 @@ class Library:
         all_words = {row["id"] for row in keyword_rows}
         # Few passages have every word (a question rarely does): those with some of the words follow them
         if plain and not document_order and total < config.PARTIAL_MATCH_BELOW:
-            any_query = build_fts_query(query_text, any_word=True)
+            any_query = build_fts_query(expanded or query_text, any_word=True)
             if any_query != fts_query:
                 where, params = self._match_scope(any_query, doc_ids, kinds, provisions)
                 some = [row for row in self._keyword_rows(where, params, "score", depth) if row["id"] not in all_words]
@@ -1093,6 +1101,228 @@ class Library:
         return [
             (_row_to_block(row), TableData(row["id"], json.loads(row["columns"]), json.loads(row["rows"])))
             for row in rows
+        ]
+
+    def joined_table(self, block: TextBlock) -> Optional[dict]:
+        """
+        A table with its continuations as one: {"caption", "columns", "rows", "pages"}. A continuation
+        that doesn't repeat the heading row keeps its first row as data.
+        """
+        parts = self.table_parts(block)
+        if not parts:
+            return None
+        head = parts[0][1].columns
+        same = lambda row: [" ".join(c.split()).lower() for c in row] == [" ".join(c.split()).lower() for c in head]
+        names, seen = [], {}
+        for i, name in enumerate(head):   # Blank or repeated heading cells (merged cells) get distinct names
+            name = name or f"Column {i + 1}"
+            seen[name] = seen.get(name, 0) + 1
+            names.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+        rows = []
+        for index, (_, data) in enumerate(parts):
+            if index and not same(data.columns):
+                rows.append(data.columns)
+            rows.extend(data.rows)
+        return {"caption": table_caption(*parts[0]), "columns": names,
+                "rows": [(row + [""] * len(names))[:len(names)] for row in rows],
+                "pages": sorted({b.page for b, _ in parts})}
+
+    def document_tables(self, doc_id: int) -> Dict[int, TableData]:
+        rows = self.conn.execute("SELECT t.* FROM tables t JOIN blocks b ON b.id = t.block_id WHERE b.doc_id = ?", (doc_id,))
+        return {r["block_id"]: TableData(r["block_id"], json.loads(r["columns"]), json.loads(r["rows"])) for r in rows}
+
+    # ---- Catalogue of identifiers ----------------------------------------------------------
+
+    def catalogue(self, doc_ids: Optional[Sequence[int]] = None) -> List[dict]:
+        """
+        Every identifier of the switched-on patterns, to browse: how it's usually written, its
+        pattern, the identifier it's part of, how many passages mention it, and whether a heading
+        or caption introduces it.
+        """
+        where, params = self._scope(doc_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT o.key, o.value, f.display, COUNT(*) AS uses, COUNT(DISTINCT o.block_id) AS passages,
+                   SUM(o.role IN ('heading', 'caption')) AS defined
+            FROM identifier_occurrences o JOIN identifier_families f
+                 ON f.doc_id = o.doc_id AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1
+            WHERE 1 = 1 {where} GROUP BY o.key, o.value
+            """, params).fetchall()
+        entries: Dict[str, dict] = {}
+        for row in rows:
+            entry = entries.setdefault(row["key"], {"key": row["key"], "value": row["value"], "pattern": row["display"],
+                                                    "passages": 0, "defined": False, "_best": 0})
+            if row["uses"] > entry["_best"]:
+                entry["value"], entry["_best"] = row["value"], row["uses"]
+            entry["passages"] += row["passages"]
+            entry["defined"] = entry["defined"] or bool(row["defined"])
+        known = set(entries)
+        for entry in entries.values():
+            del entry["_best"]
+            entry["parent"] = parent_key(entry["key"], known)
+        return sorted(entries.values(), key=lambda e: _natural(e["key"]))
+
+    def identifier_detail(self, text: str, doc_ids: Optional[Sequence[int]] = None) -> dict:
+        """
+        Everything the library holds on one identifier, as a catalogue entry: where it's introduced;
+        its own tables (those captioned or headed with it: a message's words, a word's fields); the
+        rows of other tables that list it, each as a record with the identifiers that table belongs to;
+        the rules that mention it; what it contains and what uses it.
+        """
+        key = identifier_key(text)
+        hits = self.identifier_search(text, False, doc_ids=doc_ids)
+        titles = {d.id: d.title for d in self.list_documents()}
+        related = self.related_identifiers(text, False, doc_ids=doc_ids)
+        detail = {"key": key, "value": self._display_value(key), "defined": [], "tables": [], "rows": [], "rules": [],
+                  "mentions": 0, "contains": [], "used_by": [], "parent": related.parent, "children": related.children,
+                  "related": related.related, "documents": sorted({(h.block.doc_id, titles.get(h.block.doc_id, ""))
+                                                                   for h in hits})}
+        contains: Counter = Counter()
+        used_by: Counter = Counter()
+        shown = set()
+        for hit in hits:
+            block = hit.block
+            owners = [v for v in find_candidates(block.clause_title) if identifier_key(v) != key]
+            if block.kind == "table":
+                table = self.joined_table(block)
+                caption_ids = find_candidates(table["caption"]) if table else []
+                mine = any(identifier_key(v) == key for v in caption_ids) or \
+                    (not caption_ids and any(identifier_key(v) == key for v in find_candidates(block.clause_title)))
+                if table and mine:
+                    if (block.doc_id, block.label or block.id) not in shown:   # Continuations are already joined in
+                        shown.add((block.doc_id, block.label or block.id))
+                        detail["tables"].append({"block": block, "doc_title": hit.doc_title, **table})
+                        parts = [b.id for b, _ in self.table_parts(block)]
+                        contains.update(row[0] for row in self.conn.execute(
+                            "SELECT o.value FROM identifier_occurrences o JOIN identifier_families f ON f.doc_id = o.doc_id "
+                            "AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1 "
+                            f"WHERE o.block_id IN ({', '.join('?' * len(parts))}) AND o.role = 'table' AND o.key != ?",
+                            [*parts, key]))
+                    continue
+                owners = [v for v in caption_ids if identifier_key(v) != key] or owners
+                part = next((data for b, data in self.table_parts(block) if b.id == block.id), None)
+                for index in hit.rows:
+                    if part and 0 < index <= len(part.rows):
+                        detail["rows"].append({"block": block, "doc_title": hit.doc_title, "owners": owners,
+                                               "columns": part.columns, "cells": part.rows[index - 1]})
+                used_by.update(set(owners))
+            elif hit.group == "defined":
+                detail["defined"].append({"block": block, "doc_title": hit.doc_title})
+            elif hit.group == "rule":
+                detail["rules"].append({"block": block, "doc_title": hit.doc_title})
+                used_by.update(set(owners))
+            else:
+                detail["mentions"] += 1
+        detail["contains"] = [v for v, _ in contains.most_common(200)]
+        detail["used_by"] = [v for v, _ in used_by.most_common(200)]
+        return detail
+
+    def identifier_changes(self, text: str, old_doc: int, new_doc: int) -> dict:
+        """
+        How an identifier's entry differs between two documents (two revisions of a standard): rows of
+        its own tables added, removed or changed, and rules that are in only one of them.
+        """
+        old, new = (self.identifier_detail(text, [doc]) for doc in (old_doc, new_doc))
+
+        def rows_of(detail: dict) -> Dict[str, Tuple[List[str], List[str]]]:
+            found: Dict[str, Tuple[List[str], List[str]]] = {}
+            for table in detail["tables"]:
+                for row in table["rows"]:
+                    # A row is known by the identifiers in it, or else by its first filled cell
+                    ids = [identifier_key(v) for v in dict.fromkeys(find_candidates(" ".join(row)))]
+                    name = " ".join(ids) or next((" ".join(c.split()).lower() for c in row if c.strip()), "")
+                    while name in found:
+                        name += " ·"
+                    found[name] = (table["columns"], row)
+            return found
+
+        before, after = rows_of(old), rows_of(new)
+        text_of = lambda items: {" ".join(i["block"].text.split()): i["block"] for i in items}
+        rules_before, rules_after = text_of(old["rules"]), text_of(new["rules"])
+        return {
+            "value": new["value"] or old["value"],
+            "added": [{"columns": after[k][0], "cells": after[k][1]} for k in after if k not in before],
+            "removed": [{"columns": before[k][0], "cells": before[k][1]} for k in before if k not in after],
+            "changed": [{"columns": after[k][0], "old": before[k][1], "new": after[k][1]}
+                        for k in after if k in before and [c.strip() for c in before[k][1]] != [c.strip() for c in after[k][1]]],
+            "unchanged": sum(1 for k in after if k in before and [c.strip() for c in before[k][1]] == [c.strip() for c in after[k][1]]),
+            "rules_added": [rules_after[t] for t in rules_after if t not in rules_before],
+            "rules_removed": [rules_before[t] for t in rules_before if t not in rules_after],
+            "in_old": bool(old["tables"] or old["rows"] or old["rules"] or old["defined"] or old["mentions"]),
+            "in_new": bool(new["tables"] or new["rows"] or new["rules"] or new["defined"] or new["mentions"]),
+        }
+
+    # ---- Index health ----------------------------------------------------------------------
+
+    def health(self, doc_id: int) -> List[dict]:
+        """
+        How well a document was read, as checks to look over: {"name", "value", "note", "warn"}.
+        A warning points at something the extractor may have missed, and so at passages, tables or
+        references that search and navigation won't know about.
+        """
+        doc = self.get_document(doc_id)
+        if doc is None:
+            raise ValueError("That document is no longer in the library.")
+        one = lambda sql, *params: self.conn.execute(sql, (doc_id, *params)).fetchone()[0] or 0
+        blocks = one("SELECT COUNT(*) FROM blocks WHERE doc_id = ?")
+        in_clause = one("SELECT COUNT(*) FROM blocks WHERE doc_id = ? AND (clause_num != '' OR clause_title != '')")
+        clauses = one("SELECT COUNT(DISTINCT clause_path) FROM blocks WHERE doc_id = ? AND clause_path != ''")
+        pages_read = one("SELECT COUNT(DISTINCT page) FROM blocks WHERE doc_id = ?")
+        labelled = one("SELECT COUNT(DISTINCT page) FROM blocks WHERE doc_id = ? AND page_label != ''")
+        tables = one("SELECT COUNT(*) FROM blocks WHERE doc_id = ? AND kind = 'table'")
+        uncaptioned = one("SELECT COUNT(*) FROM blocks WHERE doc_id = ? AND kind = 'table' AND label = ''")
+        figures = one("SELECT COUNT(*) FROM blocks WHERE doc_id = ? AND kind = 'figure'")
+        # Captions left as plain text: a table that wasn't detected (usually one drawn without ruled lines)
+        orphans = [row["page"] for row in self.conn.execute(
+            "SELECT page, text FROM blocks WHERE doc_id = ? AND kind = 'text' AND (text LIKE 'Table %' OR text LIKE 'TABLE %') "
+            "ORDER BY seq", (doc_id,)) if (caption := parse_caption(row["text"])) and caption.label.startswith("Table")]
+        refs = self.conn.execute("SELECT DISTINCT kind, target FROM xrefs WHERE doc_id = ? AND kind IN ('table', 'figure')",
+                                 (doc_id,)).fetchall()
+        unresolved = [r["target"] for r in refs if self.resolve(doc_id, CrossRef(0, r["kind"], r["target"])).doc_id is None]
+        families = self.identifier_families(doc_id)
+        identifiers = one("SELECT COUNT(DISTINCT o.key) FROM identifier_occurrences o JOIN identifier_families f "
+                          "ON f.doc_id = o.doc_id AND f.family = o.family AND COALESCE(f.user_enabled, f.auto_enabled) = 1 "
+                          "WHERE o.doc_id = ?")
+        provisions = dict(self.conn.execute(
+            "SELECT provision, COUNT(*) FROM blocks WHERE doc_id = ? AND provision != '' GROUP BY provision", (doc_id,)).fetchall())
+        vectors = one("SELECT COUNT(*) FROM embeddings WHERE doc_id = ?") + one("SELECT COUNT(*) FROM table_embeddings WHERE doc_id = ?")
+        share = lambda part, whole: f"{round(100 * part / whole)}%" if whole else "none"
+        pages_list = lambda pages: ", ".join(map(str, sorted(set(pages))[:15])) + ("…" if len(set(pages)) > 15 else "")
+        empty = doc.page_count - pages_read
+
+        def check(name: str, value, note: str = "", warn: bool = False) -> dict:
+            return {"name": name, "value": str(value), "note": note, "warn": warn}
+        return [
+            check("Passages", f"{blocks:,}", f"on {pages_read:,} of {doc.page_count:,} pages"),
+            check("Pages with no text read", empty,
+                  "Blank pages, or scanned pages that couldn't be read (is Tesseract installed?)." if empty else "",
+                  warn=empty > max(2, doc.page_count * 0.05)),
+            check("Pages read with OCR", doc.ocr_pages, "Text from OCR has no tables and may contain misread characters."
+                  if doc.ocr_pages else ""),
+            check("Passages placed in a clause", share(in_clause, blocks), f"{clauses:,} clauses found. A low share means "
+                  "clause headings weren't recognised: results then lack their clause, and Contents is incomplete.",
+                  warn=blocks > 0 and in_clause / blocks < 0.8),
+            check("Printed page numbers", share(labelled, pages_read),
+                  "Citations use the number printed on the page." if labelled else
+                  "None found in the PDF or its headers and footers: citations use the physical page number.",
+                  warn=pages_read > 0 and labelled / pages_read < 0.5),
+            check("Tables", f"{tables:,}", f"{uncaptioned:,} without a caption (can't be referred to or joined across pages)"
+                  if uncaptioned else ""),
+            check("Table captions with no table found", len(orphans),
+                  f"On pages {pages_list(orphans)}. These tables are probably drawn without ruled lines; their content is "
+                  "still searchable as text, but not as rows." if orphans else "", warn=bool(orphans)),
+            check("Figures", f"{figures:,}"),
+            check("References to tables and figures not found", f"{len(unresolved)} of {len(refs)}",
+                  ("For example: " + ", ".join(unresolved[:8])) if unresolved else "",
+                  warn=len(refs) > 0 and len(unresolved) / len(refs) > 0.1),
+            check("Identifiers", f"{identifiers:,}", f"in {sum(f.enabled for f in families)} of {len(families)} patterns "
+                  "switched on (see Identifiers below)"),
+            check("Requirements / recommendations / permissions",
+                  " / ".join(f"{provisions.get(k, 0):,}" for k in (REQUIREMENT, RECOMMENDATION, PERMISSION))),
+            check("Meaning search", "on" if doc.embedding_model == config.EMBEDDING_ID else "not yet",
+                  f"{vectors:,} passages and table row runs read by the model" if vectors else "",
+                  warn=doc.embedding_model != config.EMBEDDING_ID),
+            check("Distribution statement", "found" if doc.distribution else "none found", doc.distribution),
         ]
 
     # ---- Cross-references ------------------------------------------------------------------
@@ -1435,6 +1665,11 @@ def _identifier_group(block: TextBlock, roles: set, values: Sequence[str]) -> st
     if block.provision in (REQUIREMENT, RECOMMENDATION, PERMISSION):
         return "rule"
     return "mention"
+
+
+def _natural(key: str) -> list:
+    """Sort key putting M3.2 before M12.6 (numbers by value, not by their digits)."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", key)]
 
 
 def _row_to_block(row: sqlite3.Row) -> TextBlock:

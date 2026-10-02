@@ -4,6 +4,7 @@ import { api, onSignedOut } from "./api";
 import { CodeInspector } from "./code/CodeInspector";
 import { CodePanel } from "./code/CodePanel";
 import { CodeView } from "./code/CodeView";
+import { CataloguePanel } from "./documents/CataloguePanel";
 import { CollectionsPanel } from "./documents/CollectionsPanel";
 import { ComparePanel } from "./documents/ComparePanel";
 import { ContentsPanel } from "./documents/ContentsPanel";
@@ -66,7 +67,8 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
 
   // Every side panel stays mounted (hidden), so a search or a codebase's view is still there when you come back
   const panels = {
-    search: <SearchPanel />, contents: <ContentsPanel />, glossary: <GlossaryPanel />, compare: <ComparePanel />,
+    search: <SearchPanel />, contents: <ContentsPanel />, catalogue: <CataloguePanel />, glossary: <GlossaryPanel />,
+    compare: <ComparePanel />,
     collections: <CollectionsPanel />, library: <LibraryPanel />, code: <CodePanel />,
   };
   const side = Object.entries(panels).map(([name, panel]) => (

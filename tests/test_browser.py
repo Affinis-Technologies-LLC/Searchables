@@ -98,7 +98,7 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     expect(page.locator(".page-input")).to_have_value("2")
     page.locator(".inspector .segments button", has_text="Tables").click()
     page.wait_for_selector(".inspector table.data")
-    assert "Track position update" in page.locator(".inspector table.data").first.inner_text()
+    assert "Item position update" in page.locator(".inspector table.data").first.inner_text()
 
     # The document's contents, and stepping back to where we were
     page.locator(".activity-bar button", has_text="Contents").click()

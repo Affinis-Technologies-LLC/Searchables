@@ -46,6 +46,7 @@ class Document:
     extract_version: int = 1    # Extractor version that indexed it; older ones lack newer features
     embedding_model: str = ""   # Model that made its meaning vectors ("" = none yet, or not all of them)
     embedding_started: str = "" # Model whose vectors are part-way done: an interrupted run resumes from them
+    distribution: str = ""      # Its distribution statement, as printed ("DISTRIBUTION STATEMENT A. Approved…")
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class Pin:
     added_at: str
     bbox: Optional[BBox] = None
     table: Optional[dict] = None  # {"columns": [...], "rows": [[...]]} for tables
+    marking: str = ""           # The document's distribution statement, kept with the extract
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,7 @@ class Term:
     page: int
     page_label: str
     bbox: Optional[BBox] = None
+    acronym: bool = False       # From a list of acronyms: matched as written (capitals), "definition" is what it stands for
 
     @property
     def names(self) -> Tuple[str, ...]:
@@ -216,6 +219,7 @@ class ExtractedDocument:
     identifiers: List[IdentifierOccurrence] = field(default_factory=list)  # block_id is local too
     ocr_pages: List[int] = field(default_factory=list)         # Pages whose text came from OCR
     unreadable_pages: List[int] = field(default_factory=list)  # Scanned pages OCR could not handle
+    distribution: str = ""                                     # Distribution statement found in the document
 
 
 @dataclass(frozen=True)

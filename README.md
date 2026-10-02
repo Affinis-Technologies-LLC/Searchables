@@ -9,16 +9,17 @@ It also browses **source code**: point it at a folder of Java, JavaScript or Typ
 anything is declared and used, what calls what, which libraries and APIs the code depends on, and which
 front-end calls reach which back-end routes (see [Source code](#source-code)).
 
-It's designed for documents such as ISO/IEC standards and military standards (e.g. MIL-STD style
-formatting), but works on any text-based or scanned PDF. Nothing is hard-coded to one document type:
-clause structure, tables, figures and identifier patterns are discovered from each document.
+It's designed for documents such as ISO/IEC standards and military and government standards, but
+works on any text-based or scanned PDF. Nothing is hard-coded to one document type: clause structure,
+tables, figures and identifier patterns are discovered from each document.
 
 ## The interface
 
 The app opens in your browser as a workbench, laid out like an IDE:
 
-- **Views** down the left edge: Search, Contents (the open document's clauses), Glossary, Compare, Pins
-  (collections), Code and Library. Each keeps its state while you use another.
+- **Views** down the left edge: Search, Contents (the open document's clauses), Catalogue (identifiers
+  as entries), Glossary, Compare, Pins (collections), Code and Library. Each keeps its state while you
+  use another.
 - **Tabs** in the middle: every document and source file you open, each staying where you left it.
   Documents are shown as the real PDF page: search hits are highlighted, text can be selected, and
   clicking a passage explores it. **Alt+←** and **Alt+→** step back and forward through where you've been.
@@ -58,7 +59,22 @@ setting. The address bar keeps the document, page and search in view, so a place
   with citations.
 - **Edition comparison:** clause-by-clause differences between two editions, including renumbered
   clauses and changed requirements.
-- **Glossary:** terms and definitions from each document's "Terms and definitions" clause.
+- **Catalogue:** every identifier as an entry, the way a code browser lists symbols. A message shows
+  its words; a word its table of fields; a data element the table rows that list it, as records, and
+  which messages use it; each with the rules that mention it. An entry can be compared between two
+  revisions of a document: rows added, removed or changed, and rules in only one of them.
+- **Glossary:** terms and definitions from each document's "Terms and definitions" clause, and its list
+  of acronyms. A search that uses an acronym also searches for what it stands for (and the reverse),
+  since the language model doesn't know a document's own acronyms.
+- **Military-standard conventions:** table and figure numbers such as `TABLE 4.2-1`; tables continued
+  over pages ("- Continued"), with or without the heading row repeated; identifiers numbered in pairs
+  (`GRP/ITM 281/001`, also under `GRP/ITM` table headings); message labels written with a space (`M 12.6`);
+  page numbers as printed (`4-123`, `B-45`); appendix sections numbered in tens.
+- **Distribution statement:** a document's statement is found when it's indexed, shown with the
+  document, and carried into exported collections with every extract from it.
+- **How well a document was read:** Library → Manage lists what the indexer found and flags what it
+  may have missed (pages with no text, passages outside any clause, table captions with no table,
+  references that lead nowhere), so you know what to check before relying on a search.
 - **Source code:** the **Code** view browses Java, JavaScript and TypeScript codebases: symbol and text search,
   usages, caller and callee trees, type hierarchy, declared and used libraries, package dependencies,
   and HTTP routes matched to the calls that reach them.
@@ -194,6 +210,10 @@ and collections are kept.
 
 ## Configuration
 
+Identifier patterns are discovered per document and switched on automatically when they have several
+values across several passages; anything else can be switched on under Library → Manage → Identifiers.
+The Catalogue lists the switched-on patterns.
+
 Most behaviour is set in `src/config.py`: identifier discovery thresholds, how many related passages
 are shown, meaning-search thresholds, OCR language, sign-in lockout and idle time-out, and for source
 code the folders skipped, the largest file read, and how deep call trees go.
@@ -263,7 +283,7 @@ See [APP_LAYOUT.md](APP_LAYOUT.md) for what each module does.
 
 - **Intel Macs:** PyTorch stopped supporting them after version 2.2.2, so `requirements.txt` installs
   that version (with numpy 1.x) there, and current versions elsewhere.
-- **Appendices numbered in tens:** older MIL-STD appendices number their sections 10, 20, 30… in every
+- **Appendices numbered in tens:** older military-standard appendices number their sections 10, 20, 30… in every
   appendix, so a reference such as "see 10.1" can't say which appendix it means; it opens the first.
 - **Licence:** this project builds on [PyMuPDF](https://pymupdf.readthedocs.io/), which is licensed
   under the AGPL 3.0 or a commercial licence from Artifex. Choose this project's licence accordingly.

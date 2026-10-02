@@ -7,7 +7,7 @@ Searchables/
 │       ├── store.tsx           # Shared state: overview, open tabs, navigation history, pins
 │       ├── api.ts, types.ts    # Calls to the server and the shapes it returns
 │       ├── shell/              # Sign-in page, activity bar, tab bar, status bar
-│       ├── documents/          # Search, PDF page view, inspector, contents, glossary, compare, pins, library
+│       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library
 │       └── code/               # Code panel (search, files, dependencies, APIs), editor, inspector
 ├── .streamlit/, app.py         # The earlier Streamlit interface (with src/ui/), kept until the new one has been tried
 ├── README.md                   # Overview, setup, meaning-search model, data and configuration
@@ -64,7 +64,7 @@ Searchables/
 │   │   ├── collections.py      # Collections of pins (self-contained copies of passages/tables)
 │   │   ├── compare.py          # Edition comparison: clause pairing, word diffs, provision changes
 │   │   ├── export.py           # Collection → Markdown / Word with citations
-│   │   └── glossary.py         # Defined terms from "Terms and definitions" clauses
+│   │   └── glossary.py         # Defined terms from "Terms and definitions" clauses; acronym lists and their use in searches
 │   ├── ui/                     # The earlier Streamlit interface's screens (see app.py)
 │   ├── viewer/
 │   │   ├── __init__.py

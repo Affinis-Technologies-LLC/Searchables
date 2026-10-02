@@ -38,7 +38,7 @@ from src.models import Document, TextBlock
 from src.research import export
 from src.research.collections import CollectionStore, pin_key
 from src.research.compare import compare, provision_change, to_markdown, word_diff_html
-from src.research.glossary import build_glossary, terms_in_text
+from src.research.glossary import build_acronyms, build_glossary, expand_acronyms, terms_in_text
 from src.search import semantic
 from src.search.indexer import ADD, CODE, EMBED, REINDEX, Indexer
 from src.search.library import (CONTENT_KINDS, IDENTIFIER_GROUP_TITLES, PROVISION_FILTERS, RELATED_GROUPS, Library,
@@ -96,8 +96,19 @@ class Services:
         if stamp not in self._glossaries:
             if len(self._glossaries) > 100:
                 self._glossaries.clear()
-            self._glossaries[stamp] = build_glossary(self.library.document_blocks(doc.id))
+            blocks = self.library.document_blocks(doc.id)
+            self._glossaries[stamp] = build_glossary(blocks) + build_acronyms(blocks, self.library.document_tables(doc.id))
         return self._glossaries[stamp]
+
+    def acronyms(self, doc_ids: Sequence[int]) -> Dict[str, str]:
+        """Acronyms and what they stand for, from the documents in scope (all of them when none are chosen)."""
+        found: Dict[str, str] = {}
+        for doc in self.library.list_documents():
+            if not doc_ids or doc.id in doc_ids:
+                for term in self.glossary(doc):
+                    if term.acronym:
+                        found.setdefault(term.term, term.definition)
+        return found
 
     def comparison(self, old: Document, new: Document) -> list:
         stamp = tuple((d.id, d.block_count, d.page_count, d.extract_version) for d in (old, new))
@@ -345,19 +356,29 @@ def _table(block: TextBlock, rows: Optional[Sequence[int]] = None) -> Optional[d
         part = next((data for b, data in parts if b.id == block.id), parts[0][1])
         return {"caption": table_caption(block, part), "columns": part.columns,
                 "rows": [part.rows[r - 1] for r in rows if 0 < r <= len(part.rows)]}
-    names, seen = [], {}
-    for i, name in enumerate(parts[0][1].columns):   # Blank or repeated header cells (merged cells) get distinct names
-        name = name or f"Column {i + 1}"
-        seen[name] = seen.get(name, 0) + 1
-        names.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
-    return {"caption": table_caption(*parts[0]), "columns": names,
-            "rows": [(row + [""] * len(names))[:len(names)] for _, data in parts for row in data.rows],
-            "pages": sorted({b.page for b, _ in parts})}
+    return services.library.joined_table(block)
+
+
+_PAIR = re.compile(r"^([A-Z]+)/([A-Z]+) (\d+)/(\d+)$")
+
+
+def _as_written(values: Sequence[str]) -> List[str]:
+    """
+    The ways an identifier may be written on a page, to highlight it: a pair such as "GRP/ITM 281/001"
+    also appears as "GRP 281/ITM 001", and in a table under a "GRP/ITM" heading as just "281/001".
+    """
+    found = list(values)
+    for value in values:
+        pair = _PAIR.match(value)
+        if pair:
+            a, b, n, m = pair.groups()
+            found += [f"{a} {n}/{b} {m}", f"{a} {n}, {b} {m}", f"{n}/{m}"]
+    return sorted(set(found), key=len, reverse=True)
 
 
 def _terms(terms: Sequence) -> list:
     return [{"term": t.term, "synonyms": t.synonyms, "clause_num": t.clause_num, "definition": t.definition,
-             "doc_id": t.doc_id, "page": t.page, "bbox": t.bbox} for t in terms]
+             "doc_id": t.doc_id, "page": t.page, "bbox": t.bbox, "acronym": t.acronym} for t in terms]
 
 
 @api("GET", "/documents/{id:int}/pages/{page:int}")
@@ -373,8 +394,8 @@ def document_page(c: Call) -> dict:
     if identifier:
         values = library.identifier_values_on_page(doc.id, page, identifier, children)
         texts = {b.id: b.text for b in blocks}
-        matches = {bid: highlight_values(texts[bid], found) for bid, found in values.items() if bid in texts}
-        terms = tuple(sorted({v for found in values.values() for v in found}, key=len, reverse=True))
+        matches = {bid: highlight_values(texts[bid], _as_written(found)) for bid, found in values.items() if bid in texts}
+        terms = tuple(_as_written(sorted({v for found in values.values() for v in found})))
         hit_pages = library.identifier_pages(doc.id, identifier, children)
     elif query:
         hit_pages = library.hit_pages(query, doc.id)
@@ -414,6 +435,11 @@ def document_glossary(c: Call) -> list:
     return _terms(services.glossary(services.document(c.path["id"])))
 
 
+@api("GET", "/documents/{id:int}/health")
+def document_health(c: Call) -> list:
+    return services.library.health(services.document(c.path["id"]).id)
+
+
 @api("GET", "/documents/{id:int}/identifiers")
 def identifier_families(c: Call) -> list:
     doc = services.document(c.path["id"])
@@ -444,14 +470,18 @@ def search(c: Call) -> dict:
     query = c.query.get("q", "")
     by_position = c.query.get("order") == "document"
     limit = min(int(c.query.get("limit", config.DEFAULT_MAX_RESULTS)), config.MAX_DOCUMENT_ORDER_RESULTS)
+    # The model doesn't know the documents' acronyms: a plain-word search has them spelled out (and the reverse)
+    expansions = expand_acronyms(query, services.acronyms(c.ints("docs"))) if uses_meaning(query) else []
+    expanded = " ".join([query, *(f"{acronym} {meaning}" for acronym, meaning in expansions)]) if expansions else ""
     results, total = library.search(
         query, doc_ids=c.ints("docs"), limit=config.MAX_DOCUMENT_ORDER_RESULTS if by_position else limit,
-        document_order=by_position, kinds=c.words("kinds"), provisions=c.words("provisions"))
+        document_order=by_position, kinds=c.words("kinds"), provisions=c.words("provisions"), expanded=expanded)
     library.record_search(query)
     docs = {d.id: d for d in library.list_documents()}
     return {
         "total": total,
         "by_meaning": uses_meaning(query),
+        "expanded": [{"acronym": acronym, "meaning": meaning} for acronym, meaning in expansions],
         "results": [{"block": r.block, "doc_title": r.doc_title, "html": r.highlighted_text, "match": r.match,
                      "similarity": r.similarity, "score": r.score, "citation": r.citation,
                      "table": _table(r.block, r.rows) if r.rows else None,
@@ -482,6 +512,28 @@ def identifier_search(c: Call) -> dict:
         "suggestions": [] if hits else library.identifier_suggestions(query, doc_ids=doc_ids),
         "outdated": len(outdated),
     }
+
+
+@api("GET", "/catalogue")
+def catalogue(c: Call) -> list:
+    """Every identifier of the switched-on patterns (messages, words, data elements…), to browse."""
+    return services.library.catalogue(c.ints("docs"))
+
+
+@api("GET", "/catalogue/entry")
+def catalogue_entry(c: Call) -> dict:
+    text = c.query.get("id", "").strip()
+    if not text:
+        raise ValueError("Choose an identifier.")
+    detail = services.library.identifier_detail(text, c.ints("docs"))
+    detail["documents"] = [{"id": doc_id, "title": title} for doc_id, title in detail["documents"]]
+    return detail
+
+
+@api("GET", "/catalogue/changes")
+def catalogue_changes(c: Call) -> dict:
+    old, new = services.document(int(c.query.get("old", 0))), services.document(int(c.query.get("new", 0)))
+    return services.library.identifier_changes(c.query.get("id", ""), old.id, new.id)
 
 
 @api("GET", "/blocks/{id:int}/related")
@@ -547,7 +599,8 @@ def add_pin(c: Call) -> dict:
     citation = ", ".join(p for p in (doc.title, block.label or block.clause, f"p. {block.display_page}") if p)
     table = _table(block) if block.kind == "table" else None
     services.collections.add_pin(c.path["id"], block, doc.title, citation, str(c.data.get("query", "")),
-                                 {k: table[k] for k in ("caption", "columns", "rows")} if table else None)
+                                 {k: table[k] for k in ("caption", "columns", "rows")} if table else None,
+                                 marking=doc.distribution)
     return {"pinned": True, "key": pin_key(block)}
 
 

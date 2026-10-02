@@ -48,9 +48,11 @@ MAX_HEADING_CHARS = 120         # Longer lines are body text, never clause headi
 MAX_RUN_IN_TITLE_WORDS = 8      # "4.2.1 Transmit rules. The system…": longer "titles" are sentences
 
 # Bump when extraction gains features; documents indexed by an older version can be re-indexed
-EXTRACTOR_VERSION = 5           # 2: tables, figures, cross-references; 3: MIL-style conventions, identifiers;
+EXTRACTOR_VERSION = 6           # 2: tables, figures, cross-references; 3: MIL-style conventions, identifiers;
                                 # 4: identifiers written with look-alike dots and dashes; 5: deeper clause
-                                # numbers, appendix sections numbered in tens, list items under "shall:"
+                                # numbers, appendix sections numbered in tens, list items under "shall:";
+                                # 6: table numbers like 4.2-1, "- Continued" tables, paired identifiers (GRP/ITM),
+                                # printed page numbers, acronym lists, distribution statement
 
 # Identifier discovery: a family (shape such as "K#.#") counts as identifiers when it has at least
 # this many distinct values, appearing in at least this many passages. Adjustable per document in

@@ -78,16 +78,17 @@ def extractor():
     return PDFExtractor(use_ocr=False)
 
 
-def make_pdf(pages) -> bytes:
+def make_pdf(pages, header="ACME-STD-1234 Rev B", footers=None) -> bytes:
     """
     A PDF from `pages`: each a list of paragraphs (str), or tables as {"caption": str, "rows": [[cell, …], …]}
-    drawn with ruled cells. Paragraphs are spaced apart so each becomes its own passage.
+    drawn with ruled cells. Paragraphs are spaced apart so each becomes its own passage. `footers`
+    gives each page's printed number ("4-1", "A-3"); otherwise "Page N of M".
     """
     doc = pymupdf.open()
     for number, items in enumerate(pages, 1):
         page = doc.new_page()
-        page.insert_text((72, 40), "ACME-STD-1234 Rev B", fontsize=8)          # Running header
-        page.insert_text((72, 815), f"Page {number} of {len(pages)}", fontsize=8)  # Running footer
+        page.insert_text((72, 40), header, fontsize=8)                         # Running header
+        page.insert_text((290, 815), footers[number - 1] if footers else f"Page {number} of {len(pages)}", fontsize=8)
         y = 100
         for item in items:
             if isinstance(item, str):
@@ -112,16 +113,16 @@ def make_pdf(pages) -> bytes:
 STANDARD = [
     [
         "1 SCOPE",
-        "1.1 Purpose. This standard establishes the message requirements for the tactical data link terminal.",
+        "1.1 Purpose. This standard establishes the message requirements for the data terminal.",
         "2 APPLICABLE DOCUMENTS",
         "2.1 General. The documents listed in ISO 4126-1 form a part of this standard to the extent specified.",
         "3 DEFINITIONS",
         "4 GENERAL REQUIREMENTS",
         "4.1 Transmit rules",
-        "The terminal shall perform the following when a track is dropped:",
-        "a. Transmit a drop track report within 12 seconds.",
-        "b. Cease reporting the track on the interface.",
-        "The operator should review the track table weekly as described in Table 1.",
+        "The terminal shall perform the following when a item is dropped:",
+        "a. Transmit a drop item report within 12 seconds.",
+        "b. Cease reporting the item on the interface.",
+        "The operator should review the item table weekly as described in Table 1.",
         "4.2 Calibration",
         "Calibration records shall be retained for a period of 5 years after the equipment is withdrawn.",
         "NOTE The retention period may be extended by the acquiring activity.",
@@ -131,8 +132,8 @@ STANDARD = [
         "Message K3.5 shall be transmitted whenever FLD 2041 changes value, as given in Table 1.",
         {"caption": "TABLE 1. Message summary", "rows": [
             ["Message", "Field", "Purpose"],
-            ["K3.5", "FLD 2041", "Track position update"],
-            ["K3.6", "FLD 2042", "Track identity update"],
+            ["K3.5", "FLD 2041", "Item position update"],
+            ["K3.6", "FLD 2042", "Item identity update"],
             ["K4.1", "FLD 2050", "Engagement status"],
         ]},
     ],
@@ -149,3 +150,39 @@ STANDARD = [
 @pytest.fixture
 def standard_pdf() -> bytes:
     return make_pdf(STANDARD)
+
+
+def message_standard(bits="19", extra_row=None, rule="within 12 seconds"):
+    """A small standard laid out the way military standards are: a message, its words as tables of fields, data elements."""
+    word = [["FIELD", "GRP/ITM", "BITS"], ["Reference Number", "281/001", bits], ["Strength", "755/002", "4"]]
+    if extra_row:
+        word.append(extra_row)
+    return [
+        [
+            "1 SCOPE",
+            "1.1 Purpose. This standard defines the M-series messages. DISTRIBUTION STATEMENT C. Distribution "
+            "authorized to U.S. Government agencies and their contractors.",
+            "3 DEFINITIONS",
+            "3.1 Acronyms and abbreviations",
+            "SPLR Status, Position and Location Report\nRN Reference Number\nNU Network Unit",
+        ],
+        [
+            "5 DETAILED REQUIREMENTS",
+            "5.1 M3.2 Status message",
+            f"The M3.2 message shall be transmitted {rule} of a item update. Its words are M3.2I and M3.2E0; "
+            "see TABLE 5.1-1 and TABLE 5.1-2.",
+            "GRP 281/ITM 001 is the reference number (RN) of the reported item, and GRP 755/ITM 002 its strength.",
+            {"caption": "TABLE 5.1-1. M3.2I initial word", "rows": word},
+            {"caption": "TABLE 5.1-2. M3.2E0 extension word", "rows": [
+                ["FIELD", "GRP/ITM", "BITS"], ["Course", "371/001", "9"], ["Speed", "367/004", "11"]]},
+        ],
+        [
+            {"caption": "TABLE 5.1-2. M3.2E0 extension word - Continued", "rows": [
+                ["Altitude", "365/001", "13"], ["Identity", "376/007", "3"]]},
+            "5.2 M 12.6 Summary message",
+            "The M 12.6 message may carry GRP 281/ITM 001 when a NU reports its SPLR.",
+        ],
+    ]
+
+
+MESSAGE_FOOTERS = ["1", "5-1", "5-2"]

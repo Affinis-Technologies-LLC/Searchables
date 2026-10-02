@@ -75,7 +75,7 @@ def test_documents_search_and_research(signed_in, standard_pdf, monkeypatch):
 
     hits = client.get("/api/identifiers?q=k3.5" + scope).json()
     assert [h["group"] for h in hits["hits"]] == ["table", "rule"]
-    assert hits["hits"][0]["table"]["rows"] == [["K3.5", "FLD 2041", "Track position update"]]
+    assert hits["hits"][0]["table"]["rows"] == [["K3.5", "FLD 2041", "Item position update"]]
 
     page = client.get(f"/api/documents/{doc['id']}/pages/1?q=calibration records").json()
     assert page["hits"] and len(page["hits"][0]) == 4 and page["hit_pages"] == [1]
@@ -185,3 +185,45 @@ def test_code_api(signed_in):
     client.post(f"/api/collections/{collection}/pins", json={"symbol_id": fetch_user["id"]}, headers=WRITE)
     pin = client.get(f"/api/collections/{collection}/pins").json()["pins"][-1]
     assert pin["kind"] == "code" and pin["text"].startswith("export async function fetchUser")
+
+
+def test_catalogue_health_and_acronyms(signed_in):
+    from conftest import MESSAGE_FOOTERS, make_pdf, message_standard
+    client = signed_in
+    before = {d["id"] for d in client.get("/api/state").json()["documents"]}
+    for name, pages in (("XYZ-STD-8888A.pdf", message_standard()), ("XYZ-STD-8888B.pdf", message_standard(bits="21"))):
+        client.post(f"/api/documents?filename={name}", content=make_pdf(pages, header="XYZ-STD-8888", footers=MESSAGE_FOOTERS) + name.encode(),
+                    headers=WRITE)
+    wait_for_jobs(client)
+    old, new = sorted((d for d in client.get("/api/state").json()["documents"] if d["id"] not in before), key=lambda d: d["title"])
+    assert old["distribution"].startswith("DISTRIBUTION STATEMENT C")
+    for doc in (old, new):
+        for family in ("GRP/ITM#/#", "GRP#", "M#.#", "M#.#I", "M#.#E#"):
+            client.put(f"/api/documents/{doc['id']}/identifiers", json={"family": family, "enabled": True}, headers=WRITE)
+    scope = f"docs={old['id']},{new['id']}"
+
+    entries = {e["key"]: e for e in client.get(f"/api/catalogue?{scope}").json()}
+    assert entries["M3.2I"]["parent"] == "M3.2" and entries["GRP/ITM281/001"]["parent"] == "GRP281"
+    entry = client.get(f"/api/catalogue/entry?id=M3.2I&docs={old['id']}").json()
+    assert entry["tables"][0]["rows"][0] == ["Reference Number", "281/001", "19"] and "GRP/ITM 281/001" in entry["contains"]
+    assert entry["documents"] == [{"id": old["id"], "title": old["title"]}]
+    changes = client.get(f"/api/catalogue/changes?id=M3.2I&old={old['id']}&new={new['id']}").json()
+    assert [(c["old"][2], c["new"][2]) for c in changes["changed"]] == [["19", "21"]] or changes["changed"][0]["new"][2] == "21"
+
+    health = {c["name"]: c for c in client.get(f"/api/documents/{old['id']}/health").json()}
+    assert health["Printed page numbers"]["value"] == "100%" and health["Tables"]["value"] == "3"
+
+    # An acronym in a search is spelled out for the meaning search; the glossary lists it
+    found = client.get(f"/api/search?q=when is splr reported&docs={old['id']}").json()
+    assert found["expanded"] == [{"acronym": "SPLR", "meaning": "Status, Position and Location Report"}]
+    assert any(t["acronym"] and t["term"] == "RN" for t in client.get(f"/api/documents/{old['id']}/glossary").json())
+    page = client.get(f"/api/documents/{old['id']}/pages/2").json()
+    assert page["page_label"] == "5-1" and any(t["term"] == "RN" for t in page["terms"])
+    marked = client.get(f"/api/documents/{old['id']}/pages/2?identifier=GRP/ITM 281/001").json()
+    assert len(marked["hits"]) >= 2                              # "GRP 281/ITM 001" in the text, "281/001" in the table
+
+    # A pin carries the document's distribution statement into the export
+    collection = client.get("/api/state").json()["collections"][0]["id"]
+    block = next(b for b in page["blocks"] if b["text"].startswith("The M3.2 message"))
+    client.post(f"/api/collections/{collection}/pins", json={"block_id": block["id"]}, headers=WRITE)
+    assert "DISTRIBUTION STATEMENT C" in client.get(f"/api/collections/{collection}/export?format=md").text

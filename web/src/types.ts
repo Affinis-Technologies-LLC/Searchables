@@ -31,6 +31,7 @@ export interface DocumentInfo {
   outdated: boolean;
   meaning: boolean;
   busy: boolean;
+  distribution: string;     // Its distribution statement, as printed ("" when none was found)
 }
 
 export interface Collection { id: number; name: string; pin_count: number }
@@ -78,6 +79,7 @@ export interface Term {
   doc_id: number;
   page: number;
   bbox: BBox | null;
+  acronym: boolean;         // From a list of acronyms: "definition" is what it stands for
 }
 
 export interface TableData { caption: string; columns: string[]; rows: string[][]; pages?: number[] }
@@ -162,6 +164,7 @@ export interface Pin {
   bbox: BBox | null;
   table: TableData | null;
   available: boolean;
+  marking: string;
 }
 
 export interface ClauseSide { num: string; title: string; page: number; bbox: BBox | null; text: string }
@@ -277,3 +280,39 @@ export interface EndpointInfo {
 }
 
 export interface Endpoints { served: { route: EndpointInfo; calls: EndpointInfo[] }[]; unmatched: EndpointInfo[] }
+
+// ---- Catalogue of identifiers (messages, words, data elements…)
+
+export interface CatalogueEntry { key: string; value: string; pattern: string; passages: number; defined: boolean; parent: string | null }
+
+export interface Located { block: Block; doc_title: string }
+
+export interface CatalogueDetail {
+  key: string;
+  value: string;
+  defined: Located[];
+  tables: (Located & TableData)[];
+  rows: (Located & { owners: string[]; columns: string[]; cells: string[] })[];
+  rules: Located[];
+  mentions: number;
+  contains: string[];
+  used_by: string[];
+  parent: string | null;
+  children: string[];
+  related: { key: string; value: string; same_row: number; same_passage: number }[];
+  documents: { id: number; title: string }[];
+}
+
+export interface CatalogueChanges {
+  value: string;
+  added: { columns: string[]; cells: string[] }[];
+  removed: { columns: string[]; cells: string[] }[];
+  changed: { columns: string[]; old: string[]; new: string[] }[];
+  unchanged: number;
+  rules_added: Block[];
+  rules_removed: Block[];
+  in_old: boolean;
+  in_new: boolean;
+}
+
+export interface HealthCheck { name: string; value: string; note: string; warn: boolean }

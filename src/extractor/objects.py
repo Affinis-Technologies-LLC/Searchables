@@ -8,9 +8,12 @@ import pymupdf
 from src import config
 from src.models import BBox
 
-# Table/figure numbers: "5", "A.1", "A-1", or upper-case Roman numerals ("III", "A-II") as many
-# military and government documents use. Roman numerals must end the token ("TABLE INDEX" isn't one).
-_NUM = r"(?:[A-Z][.-])?(?:\d+(?:\.\d+)*|[IVXLC]+(?![A-Za-z]))"
+# Table/figure numbers: "5", "A.1", "A-1", upper-case Roman numerals ("III", "A-II"), or a clause
+# number with a sequence number ("4.2-1", "5.1-3"), as many military and government documents use.
+# Roman numerals must end the token ("TABLE INDEX" isn't one).
+_NUM = r"(?:[A-Z][.-])?(?:\d+(?:\.\d+)*(?:-\d+)?|[IVXLC]+(?![A-Za-z]))"
+# A caption ending "- Continued", "(Cont'd)" or "(Concluded)" continues the table of the same number
+_CONTINUED = re.compile(r"[\s,;:.—–-]*\(?\b(?:continued|cont'?d|concluded)\b\.?\)?[\s.]*$", re.IGNORECASE)
 
 # "Table 5 — Limits", "TABLE III. Limits.", "Table 5 (continued)". A separator (or nothing after the
 # number) is required so body sentences like "Table 5 gives the limits…" aren't taken as captions.
@@ -29,15 +32,16 @@ _ANNEX_REF = re.compile(
 )
 # Bare dotted numbers are common in body text ("1.5 times"), so a clause reference needs a lead-in
 # word; resolution later also requires the clause to exist in the document.
-# (?!\.?\d) ends the number without rejecting a sentence-final full stop ("see 4.2.")
+# (?![.-]?\d) ends the number without rejecting a sentence-final full stop ("see 4.2."), and keeps
+# "to 4.2-3" (a table number) from being read as clause 4.2
 _CLAUSE_WORD_REF = re.compile(
-    r"\b(?i:(?:sub)?(?:clauses?|paragraphs?|paras?\.?|sections?))\s+(\d{1,2}(?:\.\d{1,3}){0,9})(?!\.?\d)"
+    r"\b(?i:(?:sub)?(?:clauses?|paragraphs?|paras?\.?|sections?))\s+(\d{1,2}(?:\.\d{1,3}){0,9})(?![.-]?\d)"
 )
 _CLAUSE_LEADIN_REF = re.compile(
-    r"\b(?:see|in|of|to|under|per|with|from|and|according to|specified in|given in)\s+(\d{1,2}(?:\.\d{1,3}){1,9})(?!\.?\d)"
+    r"\b(?:see|in|of|to|under|per|with|from|and|according to|specified in|given in)\s+(\d{1,2}(?:\.\d{1,3}){1,9})(?![.-]?\d)"
 )
 # Document designations in general form rather than a list of issuing bodies: upper-case prefix
-# words ("ISO", "ISO/IEC", "EN ISO", "MIL-STD", "STANAG") then a number of 2+ digits, with optional
+# words ("ISO", "ISO/IEC", "EN ISO", "DIN-EN", "STANAG") then a number of 2+ digits, with optional
 # parts, revision letter and year ("4126-1", "B31.3", "6011C", "9001:2015"). Words used for document
 # structure ("TABLE 12", "PAGE 40") are excluded.
 _STANDARD_REF = re.compile(
@@ -75,7 +79,9 @@ def parse_caption(text: str) -> Optional[Caption]:
     for pattern, word in ((TABLE_CAPTION, "Table"), (FIGURE_CAPTION, "Figure")):
         match = pattern.match(text)
         if match and len(text) <= config.MAX_HEADING_CHARS * 2:
-            return Caption(f"{word} {match.group('num')}", (match.group("title") or "").strip(), bool(match.group("cont")))
+            title = (match.group("title") or "").strip()
+            continued = bool(match.group("cont") or _CONTINUED.search(title))
+            return Caption(f"{word} {match.group('num')}", _CONTINUED.sub("", title).strip(), continued)
     return None
 
 

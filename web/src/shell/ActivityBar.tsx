@@ -4,7 +4,8 @@ import { Icon } from "../ui";
 const ACTIVITIES: { id: Activity; icon: string; label: string; hint: string }[] = [
   { id: "search", icon: "search", label: "Search", hint: "Search the documents by words, meaning or identifier" },
   { id: "contents", icon: "contents", label: "Contents", hint: "The open document's clauses" },
-  { id: "glossary", icon: "glossary", label: "Glossary", hint: "Defined terms" },
+  { id: "catalogue", icon: "catalogue", label: "Catalogue", hint: "Identifiers as entries: messages, their words and fields, data elements, and what uses them" },
+  { id: "glossary", icon: "glossary", label: "Glossary", hint: "Defined terms and acronyms" },
   { id: "compare", icon: "compare", label: "Compare", hint: "Differences between two editions" },
   { id: "collections", icon: "collections", label: "Pins", hint: "Collections of pinned passages, tables and code" },
   { id: "code", icon: "code", label: "Code", hint: "Browse source code: symbols, usages, calls, dependencies, APIs" },
