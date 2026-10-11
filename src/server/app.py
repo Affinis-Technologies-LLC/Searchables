@@ -31,7 +31,10 @@ from starlette.staticfiles import StaticFiles
 from src import auth, config
 from src.code.models import Usage
 from src.code.parser import JAVA
-from src.code.store import CodeStore
+from src.code.complete import complete_at
+from src.code.context import context_at
+from src.code.examples import examples_for
+from src.code.store import Conflict, CodeStore
 from src.extractor.identifiers import identifier_key
 from src.extractor.pdf import ocr_available
 from src.models import Document, TextBlock
@@ -192,7 +195,10 @@ def api(method: str, path: str, public: bool = False, locked: bool = True) -> Ca
                 result = await run_in_threadpool(run)
             except NotFound as e:
                 return JSONResponse({"error": str(e) or "Not found."}, status_code=404)
-            except (ValueError, sqlite3.OperationalError) as e:
+            except Conflict as e:
+                return JSONResponse({"error": str(e), "path": e.path, "current_text": e.current_text,
+                                     "current_sha256": e.current_sha256}, status_code=409)
+            except (ValueError, sqlite3.OperationalError, OSError) as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             return result if isinstance(result, Response) else JSONResponse(plain(result))
         _routes.append(Route("/api" + path, endpoint, methods=[method]))
@@ -732,8 +738,129 @@ def code_file(c: Call) -> dict:
     file = code.file(c.path["id"])
     if file is None:
         raise NotFound("That file is no longer in the code index.")
-    return {"file": file, "text": "\n".join(code.lines(file.id)), "outline": code.outline(file.id),
-            "imports": code.imports_of(file.id), "imported_by": code.imported_by(file.id)}
+    return {"file": file, "text": code.text(file.id), "outline": code.outline(file.id),
+            "imports": code.imports_of(file.id), "imported_by": code.imported_by(file.id), "editable": True}
+
+
+# ---- Examples as you type (ADR-012): the unsaved buffer is parsed in memory, nothing is stored ----
+
+def _buffer(c: Call) -> tuple:
+    text = c.data.get("text")
+    if not isinstance(text, str):
+        raise ValueError("The request needs the editor's text.")
+    if len(text) > config.CODE_MAX_BUFFER:
+        raise ValueError("That file is too large for examples as you type.")
+    return text, int(c.data.get("line", 1)), int(c.data.get("col", 1))
+
+
+def _context_json(context) -> dict:
+    return {"file_id": context.file_id, "language": context.language, "digest": context.digest,
+            "expression": plain(context.expression), "enclosing": plain(context.enclosing),
+            "receiver_type": plain(context.receiver_type),
+            "neighbours": {"calls": sorted(context.neighbours.calls), "types": sorted(context.neighbours.types), "shape": context.neighbours.shape}}
+
+
+@api("POST", "/code/files/{id:int}/context")
+def code_context(c: Call) -> dict:
+    """The context at the cursor in the unsaved buffer, and the examples for it."""
+    file = services.code.file(c.path["id"])
+    if file is None:
+        raise NotFound("That file is no longer in the code index.")
+    text, line, col = _buffer(c)
+    context = context_at(services.code, file.id, text, line, col)
+    result = examples_for(services.code, context)
+    return {"context": _context_json(context), "filter": result.filter, "by_name": result.by_name,
+            "weights": config.EXAMPLE_WEIGHTS, "examples": plain(result.examples)}
+
+
+@api("POST", "/code/files/{id:int}/complete")
+def code_complete(c: Call) -> dict:
+    file = services.code.file(c.path["id"])
+    if file is None:
+        raise NotFound("That file is no longer in the code index.")
+    text, line, col = _buffer(c)
+    context = context_at(services.code, file.id, text, line, col)
+    return {"context": _context_json(context), "items": plain(complete_at(services.code, context))}
+
+
+@api("POST", "/code/feedback")
+def code_feedback(c: Call) -> dict:
+    services.code.record_feedback(str(c.data.get("digest", "")), int(c.data.get("ref_id", 0)), str(c.data.get("action", "")))
+    return {"recorded": True}
+
+
+# ---- Editing (ADR-011): the server writes only inside a codebase's folder, never runs anything --
+
+def _file_for_editing(file_id: int):
+    file = services.code.file(file_id)
+    if file is None:
+        raise NotFound("That file is no longer in the code index.")
+    _editable(file.codebase_id)
+    return file
+
+
+def _editable(codebase_id: int) -> None:
+    if codebase_id in services.indexer.pending_codebases():
+        raise ValueError("That codebase is being scanned; save again when that's done.")
+
+
+def _saved(file) -> dict:
+    code = services.code
+    return {"file": file, "outline": code.outline(file.id), "imports": code.imports_of(file.id),
+            "imported_by": code.imported_by(file.id)}
+
+
+@api("PUT", "/code/files/{id:int}")
+def save_code_file(c: Call) -> dict:
+    file = _file_for_editing(c.path["id"])
+    return _saved(services.code.save_file(file.id, str(c.data.get("text", "")), str(c.data.get("sha256", ""))))
+
+
+@api("POST", "/codebases/{id:int}/files")
+def create_code_file(c: Call) -> dict:
+    codebase = _codebase(c.path["id"])
+    _editable(codebase.id)
+    return _saved(services.code.create_file(codebase.id, str(c.data.get("path", "")), str(c.data.get("text", ""))))
+
+
+@api("POST", "/code/files/{id:int}/rename")
+def rename_code_file(c: Call) -> dict:
+    file = _file_for_editing(c.path["id"])
+    return _saved(services.code.rename_file(file.id, str(c.data.get("path", "")), str(c.data.get("sha256", ""))))
+
+
+@api("DELETE", "/code/files/{id:int}")
+def delete_code_file(c: Call) -> dict:
+    file = _file_for_editing(c.path["id"])
+    services.code.delete_file(file.id, str(c.data.get("sha256", "")))
+    return {"removed": True}
+
+
+@api("GET", "/codebases/{id:int}/replace")
+def preview_replace(c: Call) -> dict:
+    """Every file the replacement would change, with its new text, for the editor to show and send back."""
+    code = services.code
+    codebase = _codebase(c.path["id"])
+    find, replacement = c.query.get("q", ""), c.query.get("r", "")
+    changes = []
+    if find:
+        for file in {f.id: f for f, _, _ in code.search_text(codebase.id, find, limit=100_000)}.values():
+            text = code.text(file.id)
+            count = text.count(find)
+            if count:
+                changes.append({"file_id": file.id, "path": file.path, "sha256": file.sha256, "count": count,
+                                "text": text.replace(find, replacement)})
+    return {"changes": sorted(changes, key=lambda change: change["path"])}
+
+
+@api("POST", "/codebases/{id:int}/replace")
+def apply_replace(c: Call) -> dict:
+    codebase = _codebase(c.path["id"])
+    _editable(codebase.id)
+    changes = c.data.get("changes") or []
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("Nothing to change.")
+    return {"files": services.code.replace_in_files(codebase.id, changes)}
 
 
 @api("GET", "/code/files/{id:int}/at")

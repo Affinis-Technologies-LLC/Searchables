@@ -24,6 +24,14 @@ from src.code.models import (BY_NAME, RESOLVED, SUPERTYPE, CallNode, Codebase, C
                              Hierarchy, Symbol, Usage)
 from src.code.parser import JAVA, TYPE_KINDS, ParsedFile, language_of, parse
 
+
+class Conflict(Exception):
+    """A save, rename or deletion was refused because the file on disk isn't the one the editor opened."""
+
+    def __init__(self, path: str, current_text: str, current_sha256: str):
+        super().__init__(f"{path} has changed on disk since it was opened; it wasn't overwritten.")
+        self.path, self.current_text, self.current_sha256 = path, current_text, current_sha256
+
 READING, LINKING = "Reading files", "Linking references"
 StageCallback = Callable[[str, int, int], None]
 
@@ -46,6 +54,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     sha256      TEXT NOT NULL,
     lines       INTEGER NOT NULL,
     has_errors  INTEGER NOT NULL DEFAULT 0,
+    form        TEXT NOT NULL DEFAULT '',  -- How the file is written on disk: encoding, byte-order mark, line endings (JSON)
     UNIQUE (codebase_id, path)
 );
 CREATE TABLE IF NOT EXISTS code_symbols (
@@ -82,9 +91,13 @@ CREATE TABLE IF NOT EXISTS code_refs (
     col         INTEGER NOT NULL,
     target_id   INTEGER,
     target      TEXT,
-    chain       TEXT NOT NULL DEFAULT ''   -- What it's called on, as a path for the linker; '=' when a template reader linked it
+    chain       TEXT NOT NULL DEFAULT '',  -- What it's called on, as a path for the linker; '=' when a template reader linked it
+    shape       TEXT NOT NULL DEFAULT '',  -- Kinds of the statements around a call (parser.statement_shape), for ranking examples
+    stmt_start  INTEGER NOT NULL DEFAULT 0,
+    stmt_end    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS code_refs_name ON code_refs(codebase_id, name);
+CREATE INDEX IF NOT EXISTS code_refs_unlinked ON code_refs(codebase_id, name) WHERE target_id IS NULL AND target IS NULL;  -- By-name references a save may now link
 CREATE INDEX IF NOT EXISTS code_refs_target_id ON code_refs(target_id);
 CREATE INDEX IF NOT EXISTS code_refs_target ON code_refs(codebase_id, target);
 CREATE INDEX IF NOT EXISTS code_refs_from ON code_refs(from_symbol);
@@ -112,6 +125,13 @@ CREATE TABLE IF NOT EXISTS code_components (
     template      TEXT NOT NULL DEFAULT '',  -- An inline template
     template_line INTEGER NOT NULL DEFAULT 0,
     template_file INTEGER                    -- The template's own file in the index, when templateUrl names one
+);
+CREATE TABLE IF NOT EXISTS example_feedback (   -- What the developer did with examples shown (ADR-012): local, for tuning by hand
+    id          INTEGER PRIMARY KEY,
+    digest      TEXT NOT NULL,              -- Of the context the examples were shown for
+    ref_id      INTEGER NOT NULL,           -- The example's call site (code_refs.id; may since have been re-indexed)
+    action      TEXT NOT NULL,              -- preview, go, insert, dismiss
+    recorded_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS code_deps (
     id          INTEGER PRIMARY KEY,
@@ -180,6 +200,14 @@ _CARRIER_PACKAGES = {"Optional": "java.util", "List": "java.util", "ArrayList": 
                      "Observable": "rxjs", "Subject": "rxjs", "BehaviorSubject": "rxjs"}
 _BUILTINS = {"Array", "Promise", "Map", "Set", "Date", "RegExp", "string", "number", "boolean", "Object", "Function",
              "Element", "HTMLElement", "Document", "Window", "Response", "Error", "unknown", "any", "void", "never"}
+# Globals of browsers and Node that are called or used without an import: linked as "#name" (the same spelling as
+# built-in types), so calls to them count as an outside API rather than being left by name
+_GLOBALS = {"fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "alert",
+            "console", "JSON", "Math", "Promise", "Object", "Array", "Number", "String", "Boolean", "Date", "Error",
+            "Map", "Set", "parseInt", "parseFloat", "isNaN", "encodeURIComponent", "decodeURIComponent", "structuredClone",
+            "document", "window", "localStorage", "sessionStorage", "navigator", "location", "history", "URL",
+            "URLSearchParams", "FormData", "Headers", "Request", "Response", "AbortController", "Intl", "Symbol",
+            "process", "Buffer", "require", "module", "globalThis", "queueMicrotask", "atob", "btoa"}
 
 
 def _split_type(text: str) -> Tuple[str, str]:
@@ -259,20 +287,29 @@ def java_package(qualified: str) -> str:
 
 
 # Columns added after the first release of the code index; CREATE TABLE IF NOT EXISTS won't add them
-_ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''")], "code_refs": [("chain", "TEXT NOT NULL DEFAULT ''")]}
+_PARSED_COLUMNS = {"type", "chain", "shape"}   # Filled by the parser: an index from before they existed must be re-read
+_ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''")],
+                  "code_refs": [("chain", "TEXT NOT NULL DEFAULT ''"), ("shape", "TEXT NOT NULL DEFAULT ''"),
+                                ("stmt_start", "INTEGER NOT NULL DEFAULT 0"), ("stmt_end", "INTEGER NOT NULL DEFAULT 0")],
+                  "code_files": [("form", "TEXT NOT NULL DEFAULT ''")]}
 
 
 class CodeStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        reread = False
         for table, columns in _ADDED_COLUMNS.items():
             existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             for name, definition in columns:
                 if existing and name not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                    reread = reread or name in _PARSED_COLUMNS
+        if reread:   # The parser now records more per file: the next rescan reads every file again
+            self.conn.execute("UPDATE code_files SET sha256 = ''")
         self.conn.commit()
         self.conn.executescript(_SCHEMA)
         self._lines: Dict[int, List[str]] = {}   # File text by line, for the few files being looked at
+        self._linkers: Dict[int, "_Linker"] = {}  # Per codebase, kept warm between saves; dropped by a rescan
 
     # ---- Codebases -------------------------------------------------------------------------
 
@@ -307,6 +344,7 @@ class CodeStore:
                               (codebase_id,))
             self.conn.execute("DELETE FROM codebases WHERE id = ?", (codebase_id,))
         self._lines.clear()
+        self._linkers.pop(codebase_id, None)
 
     # ---- Indexing --------------------------------------------------------------------------
 
@@ -329,13 +367,14 @@ class CodeStore:
         changed = 0
         for done, relative in enumerate(sources, 1):
             try:
-                data = _as_utf8((root / relative).read_bytes())
+                raw = (root / relative).read_bytes()
             except OSError:
                 continue   # Unreadable now: left as it was last indexed
+            data = _as_utf8(raw)
             sha256 = hashlib.sha256(data).hexdigest()
             if known.get(relative, (None, None))[1] != sha256:
                 with self.conn:
-                    self._store_file(codebase_id, relative, data, sha256, known.get(relative, (None,))[0])
+                    self._store_file(codebase_id, relative, data, sha256, known.get(relative, (None,))[0], _form_of(raw))
                 changed += 1
             if on_progress and (done % 20 == 0 or done == len(sources)):
                 on_progress(READING, done, len(sources))
@@ -357,6 +396,7 @@ class CodeStore:
             found = manifests.read_aliases(_read_text(root / relative))
             if found:
                 aliases.append((posixpath.dirname(relative), *found))
+        self._linkers.pop(codebase_id, None)   # A rescan starts afresh
         if changed or removed or not codebase.indexed_at:   # Otherwise every link still stands
             _Linker(self.conn, codebase_id, aliases).run(on_progress)
 
@@ -384,21 +424,15 @@ class CodeStore:
                 continue
             kept.add(relative)
             try:
-                data = _as_utf8((root / relative).read_bytes())
+                raw = (root / relative).read_bytes()
             except OSError:
                 continue
+            data = _as_utf8(raw)
             sha256 = hashlib.sha256(data).hexdigest()
             file_id, old_sha = known.get(relative, (None, None))
             if old_sha != sha256:
                 with self.conn:
-                    if file_id is not None:
-                        self._delete_file(file_id)
-                    text = data.decode("utf-8", "replace")
-                    file_id = self.conn.execute(
-                        "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors) "
-                        "VALUES (?, ?, 'html', ?, ?, ?, 0)",
-                        (codebase_id, relative, posixpath.dirname(relative), sha256, text.count("\n") + 1)).lastrowid
-                    self.conn.execute("INSERT INTO code_text (rowid, content) VALUES (?, ?)", (file_id, text))
+                    file_id = self._store_template(codebase_id, relative, data, sha256, file_id, _form_of(raw))
                     known[relative] = (file_id, sha256)
             with self.conn:
                 self.conn.execute("UPDATE code_components SET template_file = ? WHERE symbol_id = ?", (file_id, row["symbol_id"]))
@@ -408,32 +442,70 @@ class CodeStore:
         self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (file_id,))
         self.conn.execute("DELETE FROM code_files WHERE id = ?", (file_id,))   # The rest cascades
 
-    def _store_file(self, codebase_id: int, path: str, data: bytes, sha256: str, old_id: Optional[int]) -> None:
+    def _store_template(self, codebase_id: int, path: str, data: bytes, sha256: str, old_id: Optional[int], form: str) -> int:
+        """A template as a file of the index: its text only; its references come from the template reader."""
+        text = data.decode("utf-8", "replace")
         if old_id is not None:
-            self._delete_file(old_id)
+            self.conn.execute("DELETE FROM code_refs WHERE file_id = ?", (old_id,))
+            self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (old_id,))
+            self.conn.execute("UPDATE code_files SET path = ?, package = ?, sha256 = ?, lines = ?, form = ? WHERE id = ?",
+                              (path, posixpath.dirname(path), sha256, text.count("\n") + 1, form, old_id))
+            file_id = old_id
+        else:
+            file_id = self.conn.execute(
+                "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors, form) "
+                "VALUES (?, ?, 'html', ?, ?, ?, 0, ?)",
+                (codebase_id, path, posixpath.dirname(path), sha256, text.count("\n") + 1, form)).lastrowid
+        self.conn.execute("INSERT INTO code_text (rowid, content) VALUES (?, ?)", (file_id, text))
+        return file_id
+
+    def _store_file(self, codebase_id: int, path: str, data: bytes, sha256: str, old_id: Optional[int], form: str = "") -> int:
+        """
+        Parses and stores a file. With `old_id`, the file keeps its id, and so do the symbols still
+        declared in it (by kind and qualified name), so open tabs and the symbol under the cursor stay valid.
+        """
         text = data.decode("utf-8", "replace")   # Line numbers match the parser's: both count "\n"
         parsed: ParsedFile = parse(path, data)
         package = parsed.package if parsed.language == JAVA else posixpath.dirname(path)
-        file_id = self.conn.execute(
-            "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (codebase_id, path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors)),
-        ).lastrowid
+        kept: Dict[Tuple[str, str, int], int] = {}
+        if old_id is not None:
+            kept = {(row["kind"], row["qualified"], row["params"]): row["id"] for row in
+                    self.conn.execute("SELECT id, kind, qualified, params FROM code_symbols WHERE file_id = ? ORDER BY id", (old_id,))}
+            for table in ("code_symbols", "code_refs", "code_imports", "code_endpoints"):
+                self.conn.execute(f"DELETE FROM {table} WHERE file_id = ?", (old_id,))
+            self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (old_id,))
+            self.conn.execute(
+                "UPDATE code_files SET path = ?, language = ?, package = ?, sha256 = ?, lines = ?, has_errors = ?, form = ? WHERE id = ?",
+                (path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form, old_id))
+            file_id = old_id
+        else:
+            file_id = self.conn.execute(
+                "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors, form) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (codebase_id, path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form),
+            ).lastrowid
         self.conn.execute("INSERT INTO code_text (rowid, content) VALUES (?, ?)", (file_id, text))
 
-        first = self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM code_symbols").fetchone()[0]
-        symbol_id = lambda index: None if index is None else first + index   # Parsed symbols refer to each other by position
+        fresh = max(self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM code_symbols").fetchone()[0],
+                    max(kept.values(), default=0) + 1)   # Past the kept ids too: the old file's may have been the highest
+        ids: List[int] = []
+        for s in parsed.symbols:   # Parsed symbols refer to each other by position; stored ones by id
+            reused = kept.pop((s.kind, s.qualified, s.params), None)
+            if reused is None:
+                reused, fresh = fresh, fresh + 1
+            ids.append(reused)
+        symbol_id = lambda index: None if index is None else ids[index]
         self.conn.executemany(
             "INSERT INTO code_symbols (id, codebase_id, file_id, parent_id, kind, name, qualified, line, end_line, "
             "signature, params, exported, is_default, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(first + i, codebase_id, file_id, symbol_id(s.parent), s.kind, s.name, s.qualified, s.line, s.end_line,
+            [(ids[i], codebase_id, file_id, symbol_id(s.parent), s.kind, s.name, s.qualified, s.line, s.end_line,
               s.signature, s.params, int(s.exported), int(s.default), s.type) for i, s in enumerate(parsed.symbols)],
         )
         self.conn.executemany(
-            "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col, chain) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(codebase_id, file_id, symbol_id(r.scope), r.kind, r.name, r.receiver, r.args, r.line, r.col, r.chain)
-             for r in parsed.refs],
+            "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col, chain, "
+            "shape, stmt_start, stmt_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(codebase_id, file_id, symbol_id(r.scope), r.kind, r.name, r.receiver, r.args, r.line, r.col, r.chain,
+              r.shape, r.stmt_start, r.stmt_end) for r in parsed.refs],
         )
         self.conn.executemany(
             "INSERT INTO code_components (symbol_id, codebase_id, selector, template_url, template, template_line) "
@@ -451,6 +523,195 @@ class CodeStore:
             [(codebase_id, file_id, symbol_id(e.scope), e.side, e.method, e.path, e.line, e.framework)
              for e in parsed.endpoints],
         )
+        return file_id
+
+    # ---- Editing (ADR-011) -----------------------------------------------------------------
+
+    def text(self, file_id: int) -> str:
+        return "\n".join(self.lines(file_id))
+
+    def _root(self, codebase_id: int) -> Path:
+        codebase = self.get(codebase_id)
+        if codebase is None:
+            raise ValueError("That codebase is no longer in the list.")
+        return Path(codebase.root)
+
+    def _writable(self, root: Path, relative: str) -> Tuple[str, Path]:
+        """
+        A path the server may write: inside the folder (not through a link leading out), not in a
+        skipped folder, and a kind of file the index reads. Returns (relative path, full path).
+        """
+        relative = relative.replace("\\", "/").strip().strip("/")
+        parts = relative.split("/")
+        if not relative or any(part in ("", ".", "..") for part in parts):
+            raise ValueError(f"“{relative}” isn't a path inside the codebase.")
+        if any(part in config.CODE_SKIP_FOLDERS or part.startswith(".") for part in parts):
+            raise ValueError(f"“{relative}” is in a folder the index doesn't read, so it can't be written there.")
+        name = parts[-1]
+        if not (language_of(name) or name.lower().endswith(".html") or name in manifests.MANIFESTS or name in manifests.SCRIPT_CONFIGS):
+            raise ValueError(f"“{name}” isn't a kind of file this app reads (source, templates and build files).")
+        full = root / relative
+        try:
+            inside = full.parent.resolve().is_relative_to(root.resolve()) and \
+                (not full.exists() or full.resolve().is_relative_to(root.resolve()))
+        except OSError as e:
+            raise ValueError(f"“{relative}” can't be written: {e}") from e
+        if not inside:
+            raise ValueError(f"“{relative}” leads outside the codebase folder.")
+        return relative, full
+
+    def _current(self, full: Path, relative: str, expected_sha256: str) -> None:
+        """Refuses to touch a file that isn't the one the editor opened."""
+        try:
+            raw = full.read_bytes()
+        except FileNotFoundError:
+            raise Conflict(relative, "", "")
+        data = _as_utf8(raw)
+        sha256 = hashlib.sha256(data).hexdigest()
+        if sha256 != expected_sha256:
+            raise Conflict(relative, data.decode("utf-8", "replace"), sha256)
+
+    @staticmethod
+    def _write(full: Path, text: str, form: str) -> bytes:
+        """Writes atomically, in the file's own form. Returns the normalised bytes written."""
+        payload = _encode_form(text, form)
+        tmp = full.with_name(full.name + ".tmp~")
+        tmp.write_bytes(payload)
+        try:
+            os.replace(tmp, full)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+        return _as_utf8(payload)
+
+    def _store_saved(self, file: CodeFile, data: bytes, form: str) -> None:
+        sha256 = hashlib.sha256(data).hexdigest()
+        with self.conn:
+            if file.language == "html":
+                self._store_template(file.codebase_id, file.path, data, sha256, file.id, form)
+            else:
+                self._store_file(file.codebase_id, file.path, data, sha256, file.id, form)
+        self._lines.pop(file.id, None)
+
+    def save_file(self, file_id: int, text: str, expected_sha256: str) -> CodeFile:
+        """Writes a file's new text (keeping its line endings and encoding), re-indexes it and re-links what it touches."""
+        file = self.file(file_id)
+        if file is None:
+            raise ValueError("That file is no longer in the code index.")
+        relative, full = self._writable(self._root(file.codebase_id), file.path)
+        self._current(full, relative, expected_sha256)
+        form = self.conn.execute("SELECT form FROM code_files WHERE id = ?", (file_id,)).fetchone()[0]
+        data = self._write(full, text, form)
+        self._store_saved(file, data, form)
+        self.relink_files(file.codebase_id, [file_id])
+        return self.file(file_id)
+
+    def create_file(self, codebase_id: int, relative: str, text: str = "") -> CodeFile:
+        root = self._root(codebase_id)
+        relative, full = self._writable(root, relative)
+        if full.exists():
+            raise ValueError(f"{relative} exists already.")
+        full.parent.mkdir(parents=True, exist_ok=True)
+        form = _default_form()
+        data = self._write(full, text, form)
+        sha256 = hashlib.sha256(data).hexdigest()
+        with self.conn:
+            if relative.lower().endswith(".html"):
+                file_id = self._store_template(codebase_id, relative, data, sha256, None, form)
+            else:
+                file_id = self._store_file(codebase_id, relative, data, sha256, None, form)
+        self.relink_files(codebase_id, [file_id])
+        return self.file(file_id)
+
+    def rename_file(self, file_id: int, new_relative: str, expected_sha256: str) -> CodeFile:
+        """Renames or moves a file; the files importing it are linked again."""
+        file = self.file(file_id)
+        if file is None:
+            raise ValueError("That file is no longer in the code index.")
+        root = self._root(file.codebase_id)
+        old_relative, old_full = self._writable(root, file.path)
+        new_relative, new_full = self._writable(root, new_relative)
+        self._current(old_full, old_relative, expected_sha256)
+        if new_full.exists():
+            raise ValueError(f"{new_relative} exists already.")
+        importers = [row["file_id"] for row in self.imported_by(file_id)]
+        new_full.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(old_full, new_full)
+        raw = new_full.read_bytes()
+        data = _as_utf8(raw)
+        with self.conn:
+            if file.language == "html" or (language_of(new_relative) is None and new_relative.lower().endswith(".html")):
+                self._store_template(file.codebase_id, new_relative, data, hashlib.sha256(data).hexdigest(), file_id, _form_of(raw))
+            else:
+                self._store_file(file.codebase_id, new_relative, data, hashlib.sha256(data).hexdigest(), file_id, _form_of(raw))
+        self._lines.pop(file_id, None)
+        self.relink_files(file.codebase_id, [file_id, *importers])
+        return self.file(file_id)
+
+    def delete_file(self, file_id: int, expected_sha256: str) -> None:
+        file = self.file(file_id)
+        if file is None:
+            raise ValueError("That file is no longer in the code index.")
+        relative, full = self._writable(self._root(file.codebase_id), file.path)
+        self._current(full, relative, expected_sha256)
+        importers = [row["file_id"] for row in self.imported_by(file_id)]
+        full.unlink()
+        with self.conn:
+            self._delete_file(file_id)
+        self._lines.pop(file_id, None)
+        self.relink_files(file.codebase_id, importers or [file_id])
+
+    def replace_in_files(self, codebase_id: int, changes: Sequence[dict]) -> List[CodeFile]:
+        """
+        Saves several files at once ({"file_id", "sha256", "text"} each): every hash is checked before
+        anything is written, so a change elsewhere stops the whole replacement.
+        """
+        root = self._root(codebase_id)
+        planned = []
+        for change in changes:
+            file = self.file(int(change["file_id"]))
+            if file is None or file.codebase_id != codebase_id:
+                raise ValueError("A file to change is no longer in the code index.")
+            relative, full = self._writable(root, file.path)
+            self._current(full, relative, change["sha256"])
+            form = self.conn.execute("SELECT form FROM code_files WHERE id = ?", (file.id,)).fetchone()[0]
+            planned.append((file, full, form, change["text"]))
+        saved = []
+        for file, full, form, text in planned:
+            data = self._write(full, text, form)
+            self._store_saved(file, data, form)
+            saved.append(file.id)
+        self.relink_files(codebase_id, saved)
+        return [self.file(file_id) for file_id in saved]
+
+    def linker(self, codebase_id: int) -> "_Linker":
+        """The codebase's linker with its state loaded (kept warm between saves and requests)."""
+        linker = self._linkers.get(codebase_id)
+        if linker is None:
+            linker = self._linkers[codebase_id] = _Linker(self.conn, codebase_id, self._aliases(codebase_id))
+            linker.load()
+        return linker
+
+    # ---- Example feedback (ADR-012) --------------------------------------------------------
+
+    def record_feedback(self, digest: str, ref_id: int, action: str) -> None:
+        if action not in ("preview", "go", "insert", "dismiss"):
+            raise ValueError("Not an action taken on an example.")
+        with self.conn:
+            self.conn.execute("INSERT INTO example_feedback (digest, ref_id, action, recorded_at) VALUES (?, ?, ?, ?)",
+                              (digest, int(ref_id), action, datetime.now().isoformat(timespec="seconds")))
+
+    def feedback(self) -> List[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM example_feedback ORDER BY id").fetchall()
+
+    def relink_files(self, codebase_id: int, file_ids: Sequence[int]) -> None:
+        """Links the files' references again, and those elsewhere they affect, with the codebase's warm linker."""
+        linker = self._linkers.get(codebase_id)
+        if linker is None:
+            linker = self.linker(codebase_id)
+        else:
+            linker.refresh(file_ids)
+        linker.run(None, only_files=list(file_ids))
 
     # ---- Files -----------------------------------------------------------------------------
 
@@ -463,14 +724,10 @@ class CodeStore:
         return _file(row) if row else None
 
     def relink(self, file_id: int) -> None:
-        """
-        Links a changed file's references again, and the references elsewhere to what it declares,
-        without re-linking the whole codebase (for the editor: a save must settle in well under a second).
-        """
+        """Links a changed file's references again, and the references elsewhere to what it declares."""
         file = self.file(file_id)
-        if file is None:
-            return
-        _Linker(self.conn, file.codebase_id, self._aliases(file.codebase_id)).run(None, only_files=[file_id])
+        if file is not None:
+            self.relink_files(file.codebase_id, [file_id])
 
     def _aliases(self, codebase_id: int) -> list:
         codebase = self.get(codebase_id)
@@ -817,7 +1074,33 @@ class CodeStore:
 
 def _file(row: sqlite3.Row) -> CodeFile:
     return CodeFile(row["id"], row["codebase_id"], row["path"], row["language"], row["package"], row["lines"],
-                    bool(row["has_errors"]))
+                    bool(row["has_errors"]), row["sha256"])
+
+
+def _form_of(raw: bytes) -> str:
+    """How a file is written on disk, to write it back the same way: encoding, byte-order mark, line endings."""
+    if raw[:2] == b"\xff\xfe":
+        encoding, bom, body = "utf-16-le", True, raw[2:].decode("utf-16-le", "replace").encode("utf-8")
+    elif raw[:2] == b"\xfe\xff":
+        encoding, bom, body = "utf-16-be", True, raw[2:].decode("utf-16-be", "replace").encode("utf-8")
+    else:
+        encoding, bom, body = "utf-8", raw.startswith(b"\xef\xbb\xbf"), raw
+    return json.dumps({"encoding": encoding, "bom": bom, "newline": "\r\n" if b"\r\n" in body else "\n"})
+
+
+def _default_form() -> str:
+    return json.dumps({"encoding": "utf-8", "bom": False, "newline": "\n"})
+
+
+def _encode_form(text: str, form: str) -> bytes:
+    """Text (with "\n" line endings) as the bytes of a file in the given form."""
+    settings = json.loads(form) if form else json.loads(_default_form())
+    body = text.replace("\r\n", "\n").replace("\n", settings["newline"])
+    if settings["encoding"] == "utf-16-le":
+        return b"\xff\xfe" + body.encode("utf-16-le")
+    if settings["encoding"] == "utf-16-be":
+        return b"\xfe\xff" + body.encode("utf-16-be")
+    return (b"\xef\xbb\xbf" if settings["bom"] else b"") + body.encode("utf-8")
 
 
 def _symbol(row: sqlite3.Row) -> Symbol:
@@ -879,55 +1162,135 @@ class _Linker:
         self.conn, self.codebase_id = conn, codebase_id
         self.aliases = sorted(aliases, key=lambda a: -len(a[0]))   # Nearest config first
 
-    def run(self, on_progress: Optional[StageCallback], only_files: Optional[Sequence[int]] = None) -> None:
-        """Links every reference, or (`only_files`) those in some files and those elsewhere to what they declare."""
+    loaded = False
+
+    def load(self) -> None:
+        """Reads the whole codebase's files, symbols and imports into memory (kept between saves)."""
         conn, cid = self.conn, self.codebase_id
         self.files = {row["id"]: row for row in conn.execute("SELECT * FROM code_files WHERE codebase_id = ?", (cid,))}
-        self.by_path = {row["path"]: file_id for file_id, row in self.files.items()}
         self.symbols = {row["id"]: row for row in conn.execute("SELECT * FROM code_symbols WHERE codebase_id = ?", (cid,))}
+        self.by_path = {row["path"]: file_id for file_id, row in self.files.items()}
         self.members: Dict[int, Dict[str, List[sqlite3.Row]]] = defaultdict(lambda: defaultdict(list))
         self.top: Dict[int, Dict[str, int]] = defaultdict(dict)        # File → its top-level symbols by name
         self.default: Dict[int, int] = {}                              # File → its default export
         self.java_types: Dict[str, int] = {}                           # Qualified name → type
         self.java_packages: Set[str] = set()
-        for symbol_id, s in sorted(self.symbols.items()):
-            java = self.files[s["file_id"]]["language"] == JAVA
-            if s["parent_id"] is not None:
-                self.members[s["parent_id"]][s["name"]].append(s)
-            elif not java:
-                self.top[s["file_id"]].setdefault(s["name"], symbol_id)
-                if s["is_default"]:
-                    self.default.setdefault(s["file_id"], symbol_id)
-            if java and s["kind"] in TYPE_KINDS:
-                self.java_types.setdefault(s["qualified"], symbol_id)
-        self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
-
-        self._link_imports()
+        self.importers: Dict[int, Set[int]] = defaultdict(set)         # File → the files importing it
         self.supers: Dict[int, List[int]] = defaultdict(list)          # Type → the types it extends or implements
         self.external_supers: Dict[int, List[str]] = defaultdict(list)
+        self.affected: Set[int] = set()                                # Symbol ids a refresh replaced or added
+        self.renamed: Set[str] = set()                                 # Names a refresh (re)declared
         self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
-        where = "codebase_id = ? AND chain != '='"
-        params: list = [cid]
-        if only_files is not None:
-            # The files' own references; references to what they declare (now or before: a re-parsed file's
-            # old symbols are gone, leaving dangling links); references in files importing them; and
-            # by-name references that may now find a declaration here
-            marks = ", ".join("?" * len(only_files))
-            where += (f" AND (file_id IN ({marks})"
-                      f" OR target_id IN (SELECT id FROM code_symbols WHERE file_id IN ({marks}))"
-                      f" OR (target_id IS NOT NULL AND target_id NOT IN (SELECT id FROM code_symbols))"
-                      f" OR file_id IN (SELECT file_id FROM code_imports WHERE target_file IN ({marks}))"
-                      f" OR (target_id IS NULL AND target IS NULL AND name IN (SELECT name FROM code_symbols WHERE file_id IN ({marks}))))")
-            params += [*only_files] * 4
-            # Inheritance elsewhere is as linked before
-            for row in conn.execute("SELECT from_symbol, target_id, target FROM code_refs WHERE codebase_id = ? "
-                                    "AND kind IN ('extends', 'implements') AND from_symbol IS NOT NULL", (cid,)):
-                if row["target_id"] is not None:
-                    self.supers[row["from_symbol"]].append(row["target_id"])
-                elif row["target"]:
-                    self.external_supers[row["from_symbol"]].append(row["target"])
-        refs = conn.execute(f"SELECT id, file_id, from_symbol, kind, name, receiver, args, chain FROM code_refs "
-                            f"WHERE {where} ORDER BY (kind IN ('extends', 'implements')) DESC, id", params).fetchall()
+        for symbol_id in sorted(self.symbols):
+            self._add_symbol(symbol_id)
+        self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
+        self._link_imports()
+        for row in conn.execute("SELECT from_symbol, target_id, target FROM code_refs WHERE codebase_id = ? "
+                                "AND kind IN ('extends', 'implements') AND from_symbol IS NOT NULL", (cid,)):
+            if row["target_id"] is not None:
+                self.supers[row["from_symbol"]].append(row["target_id"])
+            elif row["target"]:
+                self.external_supers[row["from_symbol"]].append(row["target"])
+        self.loaded = True
+
+    def _add_symbol(self, symbol_id: int) -> None:
+        s = self.symbols[symbol_id]
+        java = self.files[s["file_id"]]["language"] == JAVA
+        if s["parent_id"] is not None:
+            self.members[s["parent_id"]][s["name"]].append(s)
+        elif not java:
+            self.top[s["file_id"]].setdefault(s["name"], symbol_id)
+            if s["is_default"]:
+                self.default.setdefault(s["file_id"], symbol_id)
+        if java and s["kind"] in TYPE_KINDS:
+            self.java_types.setdefault(s["qualified"], symbol_id)
+
+    def _drop_symbol(self, symbol_id: int) -> None:
+        s = self.symbols.pop(symbol_id)
+        if s["parent_id"] is not None and s["parent_id"] in self.members:
+            self.members[s["parent_id"]][s["name"]] = [m for m in self.members[s["parent_id"]][s["name"]] if m["id"] != symbol_id]
+        self.members.pop(symbol_id, None)
+        if self.top.get(s["file_id"], {}).get(s["name"]) == symbol_id:
+            del self.top[s["file_id"]][s["name"]]
+        if self.default.get(s["file_id"]) == symbol_id:
+            del self.default[s["file_id"]]
+        if self.java_types.get(s["qualified"]) == symbol_id:
+            del self.java_types[s["qualified"]]
+        self.supers.pop(symbol_id, None)
+        self.external_supers.pop(symbol_id, None)
+        self._types.pop(symbol_id, None)
+
+    def refresh(self, file_ids: Sequence[int]) -> None:
+        """Brings the in-memory state up to date for files that were saved, renamed, created or deleted."""
+        conn = self.conn
+        marks = ", ".join("?" * len(file_ids))
+        changed = set(file_ids)
+        self.affected = {i for i, s in self.symbols.items() if s["file_id"] in changed}
+        for symbol_id in list(self.affected):
+            self._drop_symbol(symbol_id)
+        for file_id in file_ids:
+            row = self.files.pop(file_id, None)
+            if row is not None:
+                self.by_path.pop(row["path"], None)
+        for row in conn.execute(f"SELECT * FROM code_files WHERE id IN ({marks})", list(file_ids)):
+            self.files[row["id"]] = row
+            self.by_path[row["path"]] = row["id"]
+        self.renamed = set()
+        for row in conn.execute(f"SELECT * FROM code_symbols WHERE file_id IN ({marks})", list(file_ids)):
+            self.symbols[row["id"]] = row
+            self._add_symbol(row["id"])
+            self.affected.add(row["id"])
+            self.renamed.add(row["name"])
+        self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
+        self._types = {}
+        # Imports of the changed files, of the files that imported them, and any not resolved before
+        importing = set(changed)
+        for file_id in changed:
+            importing |= self.importers.pop(file_id, set())
+        self._link_imports(importing, unresolved=True)
+
+    def run(self, on_progress: Optional[StageCallback], only_files: Optional[Sequence[int]] = None) -> None:
+        """Links every reference, or (`only_files`) those in some files and those elsewhere to what they declare."""
+        conn, cid = self.conn, self.codebase_id
+        if not self.loaded:
+            self.load()
+        self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
+        columns = "id, file_id, from_symbol, kind, name, receiver, args, chain"
+        if only_files is None:
+            self.supers.clear()   # Worked out afresh: inheritance references are linked first
+            self.external_supers.clear()
+            refs = conn.execute(f"SELECT {columns} FROM code_refs WHERE codebase_id = ? AND chain != '=' "
+                                f"ORDER BY (kind IN ('extends', 'implements')) DESC, id", (cid,)).fetchall()
+        else:
+            # The files' own references; references to what they declare (now or before: a re-parsed
+            # file's old symbols are gone, leaving dangling links); references in files importing them;
+            # and by-name references that may now find a declaration here
+            files = set(only_files)
+            for file_id in only_files:
+                files |= self.importers.get(file_id, set())
+                for sid in self.affected:
+                    self.supers.pop(sid, None)
+                    self.external_supers.pop(sid, None)
+            seen: Dict[int, sqlite3.Row] = {}
+            marks = ", ".join("?" * len(files))
+            for row in conn.execute(f"SELECT {columns} FROM code_refs INDEXED BY code_refs_file WHERE file_id IN ({marks}) AND chain != '='",
+                                    list(files)):
+                seen[row["id"]] = row
+            # Just loaded (no refresh yet): the files' own symbols are the affected ones
+            affected = list(self.affected or {sid for sid, s in self.symbols.items() if s["file_id"] in files})
+            for start in range(0, len(affected), 500):
+                marks = ", ".join("?" * len(affected[start:start + 500]))
+                for row in conn.execute(f"SELECT {columns} FROM code_refs INDEXED BY code_refs_target_id WHERE target_id IN ({marks}) "
+                                        f"AND chain != '='", affected[start:start + 500]):
+                    seen[row["id"]] = row
+            # (Links to symbols a save removed are covered: `affected` holds the dropped ids too)
+            names = list(self.renamed)
+            for start in range(0, len(names), 500):
+                marks = ", ".join("?" * len(names[start:start + 500]))
+                for row in conn.execute(f"SELECT {columns} FROM code_refs INDEXED BY code_refs_unlinked WHERE codebase_id = ? AND name IN ({marks}) "
+                                        f"AND target_id IS NULL AND target IS NULL AND chain != '='", [cid, *names[start:start + 500]]):
+                    seen[row["id"]] = row
+            refs = sorted(seen.values(), key=lambda r: (r["kind"] not in ("extends", "implements"), r["id"]))
         updates = []
         for done, ref in enumerate(refs, 1):
             target = self._link(ref)
@@ -989,14 +1352,28 @@ class _Linker:
 
     # -- Imports ---------------------------------------------------------------------------------
 
-    def _link_imports(self) -> None:
-        self.java_single: Dict[int, Dict[str, str]] = defaultdict(dict)      # File → simple name → qualified
-        self.java_wild: Dict[int, List[str]] = defaultdict(list)
-        self.java_static: Dict[int, Dict[str, str]] = defaultdict(dict)      # File → member → its type
-        self.java_static_wild: Dict[int, List[str]] = defaultdict(list)
-        self.bindings: Dict[int, Dict[str, Tuple[Optional[int], str, str]]] = defaultdict(dict)  # Local → (file, package, imported)
+    def _link_imports(self, only_files: Optional[Set[int]] = None, unresolved: bool = False) -> None:
+        """Resolves imports to files of the codebase or outside packages; all of them, or those of some files."""
+        if only_files is None:
+            self.java_single: Dict[int, Dict[str, str]] = defaultdict(dict)      # File → simple name → qualified
+            self.java_wild: Dict[int, List[str]] = defaultdict(list)
+            self.java_static: Dict[int, Dict[str, str]] = defaultdict(dict)      # File → member → its type
+            self.java_static_wild: Dict[int, List[str]] = defaultdict(list)
+            self.bindings: Dict[int, Dict[str, Tuple[Optional[int], str, str]]] = defaultdict(dict)  # Local → (file, package, imported)
+            rows = self.conn.execute("SELECT * FROM code_imports WHERE codebase_id = ?", (self.codebase_id,)).fetchall()
+        else:
+            marks = ", ".join("?" * len(only_files))
+            rows = self.conn.execute(
+                f"SELECT * FROM code_imports WHERE codebase_id = ? AND (file_id IN ({marks})"
+                + (" OR (target_file IS NULL AND external = ''))" if unresolved else ")"),
+                [self.codebase_id, *only_files]).fetchall()
+            for file_id in {row["file_id"] for row in rows}:
+                for table in (self.java_single, self.java_wild, self.java_static, self.java_static_wild, self.bindings):
+                    table.pop(file_id, None)
+                for imported in self.importers.values():
+                    imported.discard(file_id)
         updates = []
-        for row in self.conn.execute("SELECT * FROM code_imports WHERE codebase_id = ?", (self.codebase_id,)).fetchall():
+        for row in rows:
             file_id, spec = row["file_id"], row["spec"]
             target_file, external = None, ""
             if self.files[file_id]["language"] == JAVA:
@@ -1022,6 +1399,8 @@ class _Linker:
                     external = external_package(spec)
                 for local, imported in json.loads(row["names"]).items():
                     self.bindings[file_id][local] = (target_file, external, imported)
+            if target_file is not None:
+                self.importers[target_file].add(file_id)
             updates.append((target_file, external, row["id"]))
         with self.conn:
             self.conn.executemany("UPDATE code_imports SET target_file = ?, external = ? WHERE id = ?", updates)
@@ -1294,6 +1673,8 @@ class _Linker:
                 return self.default.get(module)   # Calling what require() returned: the module's export
             if isinstance(target, int) and ref["kind"] == "new":
                 return self._method(target, "constructor", args, ("constructor",), set()) or target
+            if target is None and name in _GLOBALS and name not in self.bindings[file_id] and name not in self.top[file_id]:
+                return f"#{name}"   # A global of the platform, not declared anywhere: an outside API
             return target
         if receiver in ("this", "super"):
             within = self._enclosing_type(ref["from_symbol"])
@@ -1309,6 +1690,8 @@ class _Linker:
         if base == "this":
             return None
         target, module = self._binding(file_id, base)
+        if target is None and module is None and base in _GLOBALS and base not in self.bindings[file_id] and base not in self.top[file_id]:
+            target = f"#{base}"   # console.log, JSON.parse, document.querySelector…
         if isinstance(target, str):
             return f"{target}{'.' if '#' in target else '#'}{'.'.join([*rest, name])}"
         if rest:

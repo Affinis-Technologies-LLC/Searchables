@@ -1,11 +1,29 @@
+import { useSyncExternalStore } from "react";
+import { drafts } from "../code/drafts";
+import { saveFile } from "../code/editing";
 import { Tab, useApp } from "../store";
 import { Icon } from "../ui";
 
 export function TabBar() {
   const app = useApp();
+  const dirty = useSyncExternalStore((listener) => drafts.subscribe(listener), () => drafts.dirtyIds().join(","));
+  const unsaved = new Set(dirty.split(",").filter(Boolean).map(Number));
   const title = (tab: Tab) =>
     tab.kind === "doc" ? app.overview.documents.find((d) => d.id === tab.docId)?.title ?? "Document"
                        : tab.path.split("/").pop() ?? tab.path;
+  const closing = app.closing;
+  const settle = async (choice: "save" | "discard" | "cancel") => {
+    if (!closing || closing.kind !== "code") return;
+    if (choice === "save") {
+      const saved = await saveFile(closing.fileId).catch((error) => { app.notify(error.message, "error"); return undefined; });
+      if (!saved) { app.setClosing(null); return; }   // A conflict or an error: the tab stays open to show it
+      app.filesChanged();
+    } else if (choice === "discard") {
+      drafts.discard(closing.fileId);
+    }
+    app.setClosing(null);
+    if (choice !== "cancel") app.close(closing.id, true);
+  };
   return (
     <div className="tab-bar">
       <button type="button" className="nav" disabled={!app.canGoBack} onClick={app.back} title="Back (Alt+Left)">
@@ -22,7 +40,7 @@ export function TabBar() {
                onClick={() => app.activate(tab.id)}
                onAuxClick={(e) => { if (e.button === 1) app.close(tab.id); }}>
             <Icon name={tab.kind === "doc" ? "file" : "code"} size={14} />
-            <span className="tab-title">{title(tab)}</span>
+            <span className="tab-title">{title(tab)}{tab.kind === "code" && unsaved.has(tab.fileId) && <span className="unsaved" title="Unsaved changes"> ●</span>}</span>
             <button type="button" className="tab-close" title="Close"
                     onClick={(e) => { e.stopPropagation(); app.close(tab.id); }}>
               <Icon name="close" size={12} />
@@ -30,6 +48,14 @@ export function TabBar() {
           </div>
         ))}
       </div>
+      {closing && (
+        <div className="ask" role="dialog" aria-label="Unsaved changes">
+          <span>Save the changes to <b>{title(closing)}</b>?</span>
+          <button type="button" onClick={() => settle("save")}>Save</button>
+          <button type="button" onClick={() => settle("discard")}>Don't save</button>
+          <button type="button" onClick={() => settle("cancel")}>Cancel</button>
+        </div>
+      )}
     </div>
   );
 }

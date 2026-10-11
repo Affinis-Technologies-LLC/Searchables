@@ -149,6 +149,48 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     expect(page.locator(".tab.on")).to_contain_text("users.ts")
     page.wait_for_selector(".editor-pane:not([hidden]) .line-target")
 
+    # Editing: type into the file, see the unsaved mark, save with the keyboard, and find the new text on disk
+    editor = page.locator(".editor-pane:not([hidden]) .monaco-editor")
+    editor.locator(".view-lines").click()
+    page.keyboard.press("Control+End")
+    page.keyboard.press("Enter")
+    page.keyboard.type("// edited in the browser")
+    expect(page.locator(".tab.on .unsaved")).to_be_visible()
+    started = time.time()
+    page.keyboard.press("ControlOrMeta+KeyS")
+    expect(page.locator(".tab.on .unsaved")).to_have_count(0, timeout=10000)
+    assert time.time() - started < 3, "a save should settle in well under a second"
+    saved_file = next(p for p in (tmp_path / "project").rglob("users.ts"))
+    assert saved_file.read_text().rstrip().endswith("// edited in the browser")
+    # Changed on disk behind the editor: the save is refused and the two versions can be compared
+    saved_file.write_text(saved_file.read_text() + "\n// changed outside\n")
+    editor.locator(".view-lines").click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type(" and again")
+    page.keyboard.press("ControlOrMeta+KeyS")
+    expect(page.locator(".notice.error", has_text="changed on disk")).to_be_visible()
+    page.locator(".notice.error").get_by_role("button", name="Compare").click()
+    page.wait_for_selector(".editor-pane:not([hidden]) .monaco-diff-editor")
+    page.get_by_role("button", name="Take the version on disk").click()
+    expect(page.locator(".tab.on .unsaved")).to_have_count(0)
+    expect(page.locator(".editor-pane:not([hidden]) .view-line", has_text="changed outside")).to_be_visible()
+
+    # Examples as you type: a call on axios shows the codebase's other axios calls; completion lists what's known
+    editor.locator(".view-lines").click()
+    page.keyboard.press("Control+End")
+    page.keyboard.press("Enter")
+    page.keyboard.type("export function ping() { return axios.get(")
+    expect(page.locator(".inspector .context-line")).to_contain_text("axios.get", timeout=10000)
+    examples = page.locator(".inspector .card.example")
+    assert "Same outside API" in examples.first.inner_text() and "fetchUser" in examples.first.inner_text()
+    examples.first.get_by_role("button", name="Insert").click()
+    expect(page.locator(".editor-pane:not([hidden]) .view-line", has_text="/api/users/${id}")).to_have_count(2)
+    page.keyboard.press("Control+End")
+    page.keyboard.type(" axios.")
+    page.wait_for_selector(".suggest-widget .monaco-list-row", timeout=10000)
+    assert "get" in page.locator(".suggest-widget").inner_text()
+    page.keyboard.press("Escape")
+
     # Routes and the calls that reach them
     panel.locator(".segments button", has_text="APIs").click()
     panel.locator(".card", has_text="/api/users/{id}").wait_for()

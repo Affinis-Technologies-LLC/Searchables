@@ -69,6 +69,11 @@ class ParsedRef:
     chain: str = ""             # What it's called on, as a path from a known base, for the linker to follow:
                                 # "this.service.find()", "T:List<User>.stream()", "N:util.log()", "new User()",
                                 # "await N:fetch()". Steps are names, calls "name()" or "[]"; "" when it can't be told
+    shape: str = ""             # Calls and constructions: the kinds of the statements around this one, two each
+                                # way, as letters (d declaration, e expression, r return, i if, l loop, t try,
+                                # w throw, o other), the statement itself in upper case: "deEri"
+    stmt_start: int = 0         # The lines of the statement the reference is in
+    stmt_end: int = 0
 
 
 @dataclass
@@ -109,6 +114,8 @@ class ParsedFile:
     endpoints: List[ParsedEndpoint] = field(default_factory=list)
     components: List[ParsedComponent] = field(default_factory=list)
     has_errors: bool = False    # The file has syntax errors; what could be read is still recorded
+    locals: Dict[int, Dict[str, str]] = field(default_factory=dict)   # Method or function symbol → its parameters and
+                                # locals, name → declared type or chain (for completion in the editor)
 
 
 def language_of(path: str) -> Optional[str]:
@@ -161,6 +168,35 @@ def _string(node: Optional[Node]) -> Optional[str]:
     return None
 
 
+_STATEMENT_LETTERS = {
+    "local_variable_declaration": "d", "lexical_declaration": "d", "variable_declaration": "d",
+    "expression_statement": "e", "return_statement": "r", "if_statement": "i",
+    "for_statement": "l", "enhanced_for_statement": "l", "for_in_statement": "l", "while_statement": "l", "do_statement": "l",
+    "try_statement": "t", "try_with_resources_statement": "t", "throw_statement": "w",
+}
+_STATEMENTS = set(_STATEMENT_LETTERS) | {"switch_expression", "switch_statement", "break_statement", "continue_statement",
+                                         "yield_statement", "labeled_statement", "synchronized_statement", "assert_statement",
+                                         "debugger_statement", "empty_statement"}
+
+
+def statement_shape(node: Node) -> Tuple[str, int, int]:
+    """The statement a node is in, and the kinds of the statements around it (see ParsedRef.shape)."""
+    statement = node
+    while statement is not None and statement.type not in _STATEMENTS:
+        statement = statement.parent
+    if statement is None or statement.parent is None:
+        return "", 0, 0
+    siblings = [c for c in statement.parent.named_children if c.type in _STATEMENTS]
+    try:
+        index = siblings.index(statement)
+    except ValueError:
+        return "", statement.start_point[0] + 1, statement.end_point[0] + 1
+    letters = [_STATEMENT_LETTERS.get(s.type, "o") for s in siblings[max(0, index - 2):index + 3]]
+    own = min(index, 2)
+    letters[own] = letters[own].upper()
+    return "".join(letters), statement.start_point[0] + 1, statement.end_point[0] + 1
+
+
 def _looks_like_path(text: Optional[str]) -> bool:
     return bool(text) and (text.startswith(("/", "http://", "https://", "{}/")) or re.match(r"^[\w-]+/[\w{}/-]*$", text) is not None)
 
@@ -192,8 +228,9 @@ class _Reader:
     def ref(self, kind: str, name: str, node: Node, scope: Optional[int], receiver: str = "", args: int = -1,
             chain: str = "") -> None:
         if name:
+            shape, start, end = statement_shape(node) if kind in ("call", "new") else ("", 0, 0)
             self.out.refs.append(ParsedRef(kind, name, node.start_point[0] + 1, node.start_point[1] + 1, scope,
-                                           receiver, args, chain))
+                                           receiver, args, chain, shape, start, end))
 
     def endpoint(self, side: str, method: str, path: str, node: Node, scope: Optional[int], framework: str) -> None:
         self.out.endpoints.append(ParsedEndpoint(side, method, path, node.start_point[0] + 1, scope, framework))
@@ -439,6 +476,7 @@ class _JavaReader(_Reader):
         local = dict(variables)
         for child in node.named_children:
             self.visit(child, index, container, local, prefix)
+        self.out.locals[index] = {name: kind for name, kind in local.items() if name not in variables}
 
     @staticmethod
     def annotation_strings(annotation: Node) -> List[str]:
@@ -589,10 +627,16 @@ class _ScriptReader(_Reader):
               exported: bool = False, default: bool = False) -> None:
         if node.type in _SCOPES:   # A function's locals are its own
             self.locals.append({})
+            before = len(self.out.symbols)
             try:
                 return self._visit(node, scope, container, top, exported, default)
             finally:
-                self.locals.pop()
+                frame = self.locals.pop()
+                owner = next((i for i in range(before, len(self.out.symbols))
+                              if self.out.symbols[i].kind in ("function", "method", "constructor")
+                              and self.out.symbols[i].line == node.start_point[0] + 1), None)
+                if owner is not None:
+                    self.out.locals[owner] = frame
         return self._visit(node, scope, container, top, exported, default)
 
     def local(self, name: str) -> str:

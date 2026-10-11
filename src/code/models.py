@@ -22,6 +22,7 @@ class CodeFile:
     package: str                # Java package; for JS/TS the file's folder
     lines: int
     has_errors: bool            # Parsed with syntax errors: some of its symbols may be missing
+    sha256: str = ""            # Of its text as indexed: a save must present it, so a file changed outside isn't overwritten
 
 
 @dataclass(frozen=True)

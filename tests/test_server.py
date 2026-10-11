@@ -227,3 +227,84 @@ def test_catalogue_health_and_acronyms(signed_in):
     block = next(b for b in page["blocks"] if b["text"].startswith("The M3.2 message"))
     client.post(f"/api/collections/{collection}/pins", json={"block_id": block["id"]}, headers=WRITE)
     assert "DISTRIBUTION STATEMENT C" in client.get(f"/api/collections/{collection}/export?format=md").text
+
+
+def test_editing_api(signed_in, tmp_path):
+    """Saving, creating, renaming and deleting files through the API (ADR-011)."""
+    import shutil
+    client = signed_in
+    shutil.copytree(Path(__file__).parent / "codebase", tmp_path / "project")
+    codebase = client.post("/api/codebases", json={"root": str(tmp_path / "project"), "name": "Demo"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    base = f"/api/codebases/{codebase['id']}"
+    service = next(f for f in client.get(base + "/files").json() if f["path"].endswith("UserService.java"))
+    opened = client.get(f"/api/code/files/{service['id']}").json()
+    assert opened["file"]["sha256"] == service["sha256"] and opened["editable"] is True
+
+    # A save returns the new file (with its hash) and outline
+    text = opened["text"].replace("private void audit(String what)", "private void audit(String what, int level)") \
+                         .replace('audit("save")', 'audit("save", 1)')
+    saved = client.put(f"/api/code/files/{service['id']}", json={"text": text, "sha256": service["sha256"]}, headers=WRITE)
+    assert saved.status_code == 200 and saved.json()["file"]["sha256"] != service["sha256"]
+    assert any(s["name"] == "audit" and s["params"] == 2 for s in saved.json()["outline"])
+    assert "int level" in (tmp_path / "project" / service["path"]).read_text()
+
+    # A stale save is refused with the current text, so the editor can show the difference
+    stale = client.put(f"/api/code/files/{service['id']}", json={"text": "x", "sha256": service["sha256"]}, headers=WRITE)
+    assert stale.status_code == 409 and "int level" in stale.json()["current_text"] and stale.json()["current_sha256"] == saved.json()["file"]["sha256"]
+    assert "int level" in (tmp_path / "project" / service["path"]).read_text()
+
+    # Creating, renaming and deleting
+    created = client.post(base + "/files", json={"path": "backend/src/main/java/com/acme/model/Role.java",
+                                                  "text": "package com.acme.model;\npublic class Role {}\n"}, headers=WRITE)
+    assert created.status_code == 200 and created.json()["file"]["language"] == "java"
+    assert client.post(base + "/files", json={"path": "../outside.java"}, headers=WRITE).status_code == 400
+    role = created.json()["file"]
+    moved = client.post(f"/api/code/files/{role['id']}/rename", json={"path": "backend/src/main/java/com/acme/Role.java", "sha256": role["sha256"]}, headers=WRITE)
+    assert moved.status_code == 200 and moved.json()["file"]["path"].endswith("acme/Role.java")
+    assert client.request("DELETE", f"/api/code/files/{role['id']}", json={"sha256": "stale"}, headers=WRITE).status_code == 409
+    assert client.request("DELETE", f"/api/code/files/{role['id']}", json={"sha256": moved.json()["file"]["sha256"]}, headers=WRITE).status_code == 200
+    assert client.get(f"/api/code/files/{role['id']}").status_code == 404
+
+    # Replacing in several files is previewed, then applied all or nothing
+    preview = client.get(base + "/replace?q=audit&r=record").json()
+    assert {c["path"].rsplit("/", 1)[-1] for c in preview["changes"]} == {"UserService.java"} and preview["changes"][0]["count"] == 2
+    changes = [{"file_id": c["file_id"], "sha256": c["sha256"], "text": c["text"]} for c in preview["changes"]]
+    applied = client.post(base + "/replace", json={"changes": changes}, headers=WRITE)
+    assert applied.status_code == 200 and len(applied.json()["files"]) == 1
+    assert [h["line"] for h in client.get(base + "/text?q=record").json()] == [18, 26]
+
+    # Saving while a scan is running is refused
+    client.post(base + "/scan", headers=WRITE)
+    busy = client.put(f"/api/code/files/{service['id']}", json={"text": text, "sha256": "x"}, headers=WRITE)
+    assert busy.status_code in (400, 409)
+    wait_for_jobs(client)
+
+
+def test_examples_api(signed_in):
+    """Context, examples, completion and feedback for an unsaved buffer (ADR-012)."""
+    client = signed_in
+    codebase = client.post("/api/codebases", json={"root": str(Path(__file__).parent / "codebase_examples"), "name": "Shop"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    service = next(f for f in client.get(f"/api/codebases/{codebase['id']}/files").json() if f["path"].endswith("OrderService.java"))
+    text = client.get(f"/api/code/files/{service['id']}").json()["text"]
+    marker = "    public List<Order> open() {\n"
+    position = text.index(marker) + len(marker)
+    typed = "        repository.find("
+    buffer = text[:position] + typed + "\n" + text[position:]
+    line = buffer.count("\n", 0, position) + 1
+    body = {"text": buffer, "line": line, "col": len(typed) + 1}
+
+    answer = client.post(f"/api/code/files/{service['id']}/context", json=body, headers=WRITE).json()
+    assert answer["context"]["receiver_type"]["qualified"] == "com.shop.repo.OrderRepository"
+    assert answer["filter"] == "same member on the same type" and answer["weights"]["T"] == 0.3
+    first = answer["examples"][0]
+    assert first["enclosing"] == "com.shop.service.OrderService#load" and first["features"]["T"] == 1.0 and first["lines"]
+    assert client.post(f"/api/code/files/{service['id']}/context", json={"text": 5}, headers=WRITE).status_code == 400
+
+    body["col"] = len("        repository.") + 1
+    items = client.post(f"/api/code/files/{service['id']}/complete", json=body, headers=WRITE).json()["items"]
+    assert {i["name"] for i in items} >= {"find", "save", "all", "count"} and next(i for i in items if i["name"] == "find")["examples"] == 3
+
+    assert client.post("/api/code/feedback", json={"digest": answer["context"]["digest"], "ref_id": first["ref_id"], "action": "insert"}, headers=WRITE).status_code == 200
+    assert client.post("/api/code/feedback", json={"digest": "x", "ref_id": 1, "action": "stole"}, headers=WRITE).status_code == 400

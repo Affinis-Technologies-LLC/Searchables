@@ -17,5 +17,7 @@ to them or supersedes them knowingly.
 | [ADR-008](adr-008-security-and-testing.md) | How restricted material is handled, and how the code is protected by tests |
 | [ADR-009](adr-009-adr-first-and-tests-first.md) | A record before anything new; tests before any change; how people and agents work the same way |
 | [ADR-010](adr-010-type-resolution-and-framework-rules.md) | Type resolution without a compiler, and Angular/React conventions as rules (roadmap step 1, built) |
+| [ADR-011](adr-011-writable-editor.md) | The writable editor, what the server may write, and the index on save (roadmap step 2, built) |
+| [ADR-012](adr-012-examples-and-completion.md) | Examples as you type and completion from the index — context, filters, ranking, evaluation set (roadmap step 3, built) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

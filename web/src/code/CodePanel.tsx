@@ -2,9 +2,11 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, query } from "../api";
 import { useDebounced, useLoad } from "../hooks";
 import { useApp } from "../store";
-import { Codebase, CodeFile, CodeSymbol, Dependencies, Endpoints, Usage } from "../types";
+import { Codebase, CodeFile, CodeSymbol, Dependencies, Endpoints, ReplacePreview, Usage } from "../types";
 import { Badge, Chips, Empty, Icon, Segments, shortPath, Status } from "../ui";
 import { UsageRows } from "./common";
+import { drafts } from "./drafts";
+import { createFile, deleteFile, renameFile } from "./editing";
 import { forgetFiles } from "./files";
 
 const VIEWS = ["Search", "Files", "Dependencies", "APIs"] as const;
@@ -32,7 +34,7 @@ export function CodePanel() {
   const remove = async () => {
     if (codebase && window.confirm(`Forget “${codebase.name}” and its index? The folder itself isn't touched.`)) {
       await app.run(api.del(`/codebases/${codebase.id}`));
-      app.tabs.filter((t) => t.kind === "code").forEach((t) => app.close(t.id));
+      app.tabs.filter((t) => t.kind === "code").forEach((t) => { if (t.kind === "code") drafts.discard(t.fileId); app.close(t.id, true); });
       app.setSymbolId(null);
       app.refresh();
     }
@@ -65,7 +67,7 @@ export function CodePanel() {
         <div className="panel-body">
           <Empty>Add the top folder of a Java, JavaScript or TypeScript project to browse it: where anything is declared and
             used, what calls what, and which libraries and APIs the code depends on. The folder is read where it is;
-            nothing in it is changed.</Empty>
+            only the files you edit and save here are written.</Empty>
         </div>
       )}
       {codebase?.indexed_at && (
@@ -119,24 +121,68 @@ function CodeSearch({ codebase }: { codebase: Codebase }) {
     [codebase.id, codebase.indexed_at, mode, wanted, kinds]);
   const lines = useLoad<{ file_id: number; path: string; line: number; text: string }[]>(
     () => (mode === "Text" && wanted ? api.get(`/codebases/${codebase.id}/text` + query({ q: wanted })) : null),
-    [codebase.id, codebase.indexed_at, mode, wanted]);
+    [codebase.id, codebase.indexed_at, app.filesVersion, mode, wanted]);
+  const [replacing, setReplacing] = useState(false);
+  const [replacement, setReplacement] = useState("");
+  const [preview, setPreview] = useState<ReplacePreview | null>(null);
+  useEffect(() => { setPreview(null); }, [text, replacement, codebase.id]);
+  const previewReplace = async () => {
+    const result = await app.run(api.get<ReplacePreview>(`/codebases/${codebase.id}/replace` + query({ q: text, r: replacement })));
+    if (result) setPreview(result);
+  };
+  const applyReplace = async () => {
+    if (!preview?.changes.length) return;
+    const unsaved = preview.changes.filter((c) => drafts.isDirty(c.file_id));
+    if (unsaved.length) { app.notify(`Save or discard the changes to ${unsaved.map((c) => c.path.split("/").pop()).join(", ")} first.`, "error"); return; }
+    const changes = preview.changes.map((c) => ({ file_id: c.file_id, sha256: c.sha256, text: c.text }));
+    const done = await app.run(api.post<{ files: CodeFile[] }>(`/codebases/${codebase.id}/replace`, { changes }));
+    if (done) {
+      forgetFiles();
+      app.filesChanged();
+      app.notify(`Replaced in ${done.files.length} file${done.files.length === 1 ? "" : "s"}.`);
+      setPreview(null);
+      setReplacing(false);
+    }
+  };
+  const total = preview?.changes.reduce((n, c) => n + c.count, 0) ?? 0;
   return (
     <>
       <div className="panel-head">
         <Segments options={["Symbols", "Text"] as const} value={mode} onChange={setMode} />
-        <input type="search" value={text} onChange={(e) => setText(e.target.value)} aria-label="Search the code"
-               placeholder={mode === "Symbols" ? "A class, method or function name" : "Any text in the source: a string, a URL, part of a name"} />
+        <div className="row">
+          <input type="search" className="grow" value={text} onChange={(e) => setText(e.target.value)} aria-label="Search the code"
+                 placeholder={mode === "Symbols" ? "A class, method or function name" : "Any text in the source: a string, a URL, part of a name"} />
+          {mode === "Text" && <button type="button" onClick={() => setReplacing(!replacing)} title="Replace in the whole codebase" aria-pressed={replacing}>Replace</button>}
+        </div>
         {mode === "Symbols" && <Chips options={Object.keys(KINDS)} value={kinds} onChange={setKinds} />}
+        {mode === "Text" && replacing && (
+          <div className="row">
+            <input type="text" className="grow" value={replacement} onChange={(e) => setReplacement(e.target.value)} aria-label="Replace with" placeholder="Replace with (exact text, matching case)" />
+            <button type="button" disabled={!text} onClick={previewReplace}>Preview</button>
+          </div>
+        )}
       </div>
       <div className="panel-body">
         <Status loading={symbols.loading || lines.loading} error={symbols.error || lines.error} />
+        {mode === "Text" && replacing && preview && (
+          <div className="notice" role="status">
+            <span className="grow">{preview.changes.length ? `${total} occurrence${total === 1 ? "" : "s"} in ${preview.changes.length} file${preview.changes.length === 1 ? "" : "s"}:` : "Nothing to replace."}</span>
+            {preview.changes.length > 0 && <button type="button" onClick={applyReplace}>Replace all</button>}
+            {preview.changes.map((c) => (
+              <button key={c.file_id} type="button" className="code-row usage" title={c.path} style={{ width: "100%" }}
+                      onClick={() => app.openCode({ fileId: c.file_id, path: c.path, line: 1 })}>
+                <span className="where">{shortPath(c.path, 3)}</span><code>{c.count} ×</code>
+              </button>
+            ))}
+          </div>
+        )}
         {!wanted && <Empty>Results open in the editor. Choosing a symbol shows its usages, calls and hierarchy on the right.</Empty>}
         {mode === "Symbols" && symbols.data && (
           <>
             <div className="summary"><span>{symbols.data.length} symbol{symbols.data.length === 1 ? "" : "s"}</span></div>
             {symbols.data.map((symbol) => (
               <article key={symbol.id} className={`card ${app.symbolId === symbol.id ? "selected" : ""}`}
-                       onClick={() => { app.openCode({ fileId: symbol.file_id, path: symbol.path, line: symbol.line }); app.setSymbolId(symbol.id); app.setAt(null); }}>
+                       onClick={() => { app.openCode({ fileId: symbol.file_id, path: symbol.path, line: symbol.line }); app.setSymbolId(symbol.id); app.setAt(null); if (app.inspectorView === "Examples") app.setInspectorView("Usages"); }}>
                 <header><Badge kind="object">{symbol.kind}</Badge><span className="card-title">{symbol.name}</span></header>
                 <div className="card-path">{symbol.path}:{symbol.line}</div>
                 <code className="signature">{symbol.signature}</code>
@@ -178,13 +224,44 @@ function buildTree(files: CodeFile[]): TreeNode {
 
 function FileTree({ codebase }: { codebase: Codebase }) {
   const app = useApp();
-  const { data, loading, error } = useLoad<CodeFile[]>(() => api.get(`/codebases/${codebase.id}/files`), [codebase.id, codebase.indexed_at]);
+  const { data, loading, error } = useLoad<CodeFile[]>(() => api.get(`/codebases/${codebase.id}/files`), [codebase.id, codebase.indexed_at, app.filesVersion]);
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
   const tree = useMemo(() => buildTree(data ?? []), [data]);
   const wanted = filter.trim().toLowerCase();
   const matches = useMemo(() => (wanted ? (data ?? []).filter((f) => f.path.toLowerCase().includes(wanted)).slice(0, 300) : []), [data, wanted]);
   const activeFile = app.active?.kind === "code" ? app.active.fileId : null;
+  const activeTab = app.active?.kind === "code" ? app.active : null;
+  const [form, setForm] = useState<{ kind: "new" | "rename"; path: string } | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const reload = () => { forgetFiles(); app.filesChanged(); };
+  const folderOf = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!form) return;
+    const path = form.path.trim();
+    if (form.kind === "new") {
+      const saved = await app.run(createFile(codebase.id, path));
+      if (!saved) return;
+      reload();
+      app.openCode({ fileId: saved.file.id, path: saved.file.path, line: 1 });
+    } else if (activeTab) {
+      const saved = await app.run(renameFile(activeTab.fileId, path));
+      if (!saved) return;
+      reload();
+      app.updateCode(activeTab.id, { path: saved.file.path });
+    }
+    setForm(null);
+  };
+  const remove = async () => {
+    if (!activeTab) return;
+    if (await app.run(deleteFile(activeTab.fileId).then(() => true))) {
+      reload();
+      app.close(activeTab.id, true);
+      app.setSymbolId(null);
+    }
+    setConfirming(false);
+  };
 
   const toggle = (path: string) => setOpen((current) => {
     const next = new Set(current);
@@ -221,7 +298,27 @@ function FileTree({ codebase }: { codebase: Codebase }) {
   return (
     <>
       <div className="panel-head">
-        <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Find a file by part of its path" />
+        <div className="row">
+          <input type="search" className="grow" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Find a file by part of its path" />
+          <button type="button" title="New file" onClick={() => { setConfirming(false); setForm({ kind: "new", path: folderOf(activeTab?.path ?? "") }); }}><Icon name="plus" size={13} /></button>
+          <button type="button" title="Rename or move the open file" disabled={!activeTab} onClick={() => { setConfirming(false); setForm({ kind: "rename", path: activeTab?.path ?? "" }); }}>Rename</button>
+          <button type="button" title="Delete the open file" disabled={!activeTab} onClick={() => { setForm(null); setConfirming(true); }}><Icon name="trash" size={13} /></button>
+        </div>
+        {form && (
+          <form className="inline-form" onSubmit={submit}>
+            <input type="text" value={form.path} onChange={(e) => setForm({ ...form, path: e.target.value })} autoFocus
+                   aria-label={form.kind === "new" ? "Path of the new file" : "New path"} placeholder="folder/Name.java" />
+            <button type="submit" disabled={!form.path.trim()}>{form.kind === "new" ? "Create" : "Move"}</button>
+            <button type="button" onClick={() => setForm(null)}>Cancel</button>
+          </form>
+        )}
+        {confirming && activeTab && (
+          <div className="notice error" role="alertdialog">
+            <span className="grow">Delete <b>{activeTab.path.split("/").pop()}</b> from disk?</span>
+            <button type="button" onClick={remove}>Delete</button>
+            <button type="button" onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
+        )}
       </div>
       <div className="panel-body tree">
         <Status loading={loading && !data} error={error} />

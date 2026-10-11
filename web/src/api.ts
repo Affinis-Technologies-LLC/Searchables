@@ -1,7 +1,7 @@
 // Calls to the local server. Anything that changes data carries the header the server requires.
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(message: string, public status: number, public body: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -26,11 +26,13 @@ async function request<T>(method: string, path: string, body?: unknown, raw?: Bl
   });
   if (!response.ok) {
     let message = `The server answered ${response.status}.`;
+    let body: Record<string, unknown> = {};
     try {
-      message = (await response.json()).error ?? message;
+      body = await response.json();
+      message = (body.error as string) ?? message;
     } catch { /* Not JSON: keep the status */ }
     if (response.status === 401 && !path.startsWith("/session")) listeners.forEach((listener) => listener());
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, body);
   }
   return response.json() as Promise<T>;
 }
@@ -40,7 +42,7 @@ export const api = {
   post: <T,>(path: string, body: unknown = {}) => request<T>("POST", path, body),
   put: <T,>(path: string, body: unknown = {}) => request<T>("PUT", path, body),
   patch: <T,>(path: string, body: unknown = {}) => request<T>("PATCH", path, body),
-  del: <T,>(path: string) => request<T>("DELETE", path, {}),
+  del: <T,>(path: string, body: unknown = {}) => request<T>("DELETE", path, body),
   upload: <T,>(path: string, file: Blob) => request<T>("POST", path, undefined, file),
 };
 

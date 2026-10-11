@@ -40,6 +40,6 @@ identifiable from the repository. The code changes often and in large steps.
 
 ## Consequences
 
-- There are no unit tests of the front end's components, only the browser flow; front-end work
-  should add them (Vitest fits the existing build).
+- Front-end unit tests began with ADR-011 (Vitest, `npm test`, also run by `npm run build`); the
+  components are still covered by the browser flow only.
 - Windows is the target but untested here; the scripts are syntax-checked only.

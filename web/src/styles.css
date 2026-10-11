@@ -251,6 +251,17 @@ details.related > summary::-webkit-details-marker { display: none; }
 
 /* ---- Code ----------------------------------------------------------------------------------- */
 .code-host { flex: 1 1 auto; min-height: 0; }
+.unsaved { color: #d97706; font-weight: 700; }
+.context-line { font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.context-line code { font-family: var(--mono); }
+.card.example .score { font-family: var(--mono); font-size: 11px; margin-left: auto; }
+.snippet { margin: 6px 0; padding: 4px 6px; font-family: var(--mono); font-size: 11.5px; line-height: 1.45; overflow-x: auto; background: var(--code-bg, rgba(127, 127, 127, 0.08)); border-radius: 4px; white-space: pre; }
+.snippet .ln { display: inline-block; width: 3.2em; color: var(--muted); user-select: none; }
+.snippet .hit { background: rgba(250, 204, 21, 0.22); }
+button.quiet { opacity: 0.7; }
+.ask { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 12px; background: rgba(202, 138, 4, 0.13); border-left: 1px solid var(--border); white-space: nowrap; }
+.inline-form { display: flex; gap: 6px; align-items: center; padding: 4px 8px; }
+.inline-form input { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 12px; }
 .line-target { background: rgba(250, 204, 21, 0.22); }
 .line-target-margin { border-left: 3px solid #eab308; margin-left: 3px; }
 .symbol-head { display: flex; flex-direction: column; gap: 3px; }

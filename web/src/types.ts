@@ -199,7 +199,7 @@ export interface IdentifierFamily {
 
 // ---- Source code
 
-export interface CodeFile { id: number; codebase_id: number; path: string; language: string; lines: number; has_errors: boolean }
+export interface CodeFile { id: number; codebase_id: number; path: string; language: string; lines: number; has_errors: boolean; sha256: string }
 
 export interface CodeSymbol {
   id: number;
@@ -243,7 +243,52 @@ export interface FileDetail {
   outline: CodeSymbol[];
   imports: { line: number; spec: string; target_file: number | null; target_path: string | null; external: string }[];
   imported_by: { line: number; spec: string; file_id: number; path: string }[];
+  editable?: boolean;
 }
+
+/** The server's answer to a save, rename or creation: the file and its new outline. */
+export type SavedFile = Omit<FileDetail, "text">;
+
+// ---- Examples as you type (ADR-012)
+
+export interface Expression { kind: string; name: string; partial: string; receiver: string; args_so_far: number; chain: string; start_col: number }
+export interface TypeRef { id: number | null; qualified: string; path: string; certainty: string; carried: string }
+export interface Enclosing { id: number | null; kind: string; qualified: string; name: string; type: string; package: string; line: number; end_line: number; type_id: number | null }
+export interface ExampleContext {
+  file_id: number;
+  language: string;
+  digest: string;
+  expression: Expression;
+  enclosing: Enclosing | null;
+  receiver_type: TypeRef | null;
+  neighbours: { calls: string[]; types: string[]; shape: string };
+}
+export interface Example {
+  ref_id: number;
+  file_id: number;
+  path: string;
+  line: number;
+  col: number;
+  start: number;
+  end: number;
+  lines: string[];
+  first_line: number;
+  statement: string;
+  enclosing: string;
+  enclosing_id: number | null;
+  target: string;
+  certainty: string;
+  features: Record<string, number>;
+  score: number;
+  reason: string;
+}
+export interface ExamplesAnswer { context: ExampleContext; filter: string; by_name: boolean; weights: Record<string, number>; examples: Example[] }
+export interface CompletionItem {
+  name: string; kind: string; params: number; signature: string; type: string; examples: number; detail: string;
+  insert_import: string | null; symbol_id: number | null;
+}
+
+export interface ReplacePreview { changes: { file_id: number; path: string; sha256: string; count: number; text: string }[] }
 
 export interface At { ref: Usage | null; target: CodeSymbol | null; declared: CodeSymbol | null; candidates: CodeSymbol[] }
 

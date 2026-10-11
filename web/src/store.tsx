@@ -1,5 +1,6 @@
 // What the whole app shares: the library overview, the open tabs, where you've been, and the active collection.
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { drafts } from "./code/drafts";
 import { api } from "./api";
 import { At, BBox, Block, Overview } from "./types";
 
@@ -36,10 +37,17 @@ interface AppContext {
   tabs: Tab[];
   active: Tab | null;
   activate: (id: string) => void;
-  close: (id: string) => void;
+  close: (id: string, force?: boolean) => void;
   openDoc: (location: DocLocation) => void;
   openCode: (location: CodeLocation) => void;
   updateDoc: (id: string, patch: Partial<DocTab>) => void;
+  updateCode: (id: string, patch: Partial<CodeTab>) => void;
+  filesVersion: number;         // Bumped when a file was saved, created, renamed or deleted: file views load again
+  filesChanged: () => void;
+  closing: Tab | null;          // A tab with unsaved changes the user asked to close: the tab bar asks what to do
+  setClosing: (tab: Tab | null) => void;
+  inspectorView: string;        // The code inspector's view (Examples while typing, Usages when following a symbol)
+  setInspectorView: (view: string) => void;
   back: () => void;
   forward: () => void;
   canGoBack: boolean;
@@ -84,6 +92,10 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const [symbolId, setSymbolId] = useState<number | null>(null);
   const [at, setAt] = useState<At | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [filesVersion, setFilesVersion] = useState(0);
+  const filesChanged = useCallback(() => setFilesVersion((n) => n + 1), []);
+  const [closing, setClosing] = useState<Tab | null>(null);
+  const [inspectorView, setInspectorView] = useState("Usages");
   const [cite, setCiteState] = useState(() => window.localStorage.getItem("searchables-cite") !== "off");
   const setCite = useCallback((on: boolean) => {
     setCiteState(on);
@@ -160,6 +172,9 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const updateDoc = useCallback((id: string, patch: Partial<DocTab>) => {
     setTabs((all) => all.map((t) => (t.id === id && t.kind === "doc" ? { ...t, ...patch } : t)));
   }, []);
+  const updateCode = useCallback((id: string, patch: Partial<CodeTab>) => {
+    setTabs((all) => all.map((t) => (t.id === id && t.kind === "code" ? { ...t, ...patch } : t)));
+  }, []);
 
   const step = useCallback((delta: number) => {
     const h = history.current;
@@ -188,8 +203,13 @@ export function AppProvider({ initial, children }: { initial: Overview; children
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const close = useCallback((id: string) => {
+  const close = useCallback((id: string, force = false) => {
     setTabs((all) => {
+      const tab = all.find((t) => t.id === id);
+      if (!force && tab?.kind === "code" && drafts.isDirty(tab.fileId)) {
+        setClosing(tab);   // Unsaved changes: the tab bar asks whether to save or discard them
+        return all;
+      }
       const remaining = all.filter((t) => t.id !== id);
       setActiveId((current) => (current === id ? remaining[remaining.length - 1]?.id ?? null : current));
       return remaining;
@@ -223,14 +243,14 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const value = useMemo<AppContext>(() => ({
     overview, refresh, activity, setActivity, tabs,
     active: tabs.find((t) => t.id === activeId) ?? null,
-    activate: setActiveId, close, openDoc, openCode, updateDoc,
+    activate: setActiveId, close, openDoc, openCode, updateDoc, updateCode, filesVersion, filesChanged, closing, setClosing, inspectorView, setInspectorView,
     back: () => step(-1), forward: () => step(1),
     canGoBack: history.current.index > 0,
     canGoForward: history.current.index < history.current.places.length - 1,
     collectionId, setCollectionId, pinned, pinsVersion, togglePin, pinSymbol,
     pinsChanged: () => { setPinsVersion((n) => n + 1); refresh(); },
     symbolId, setSymbolId, at, setAt, cite, setCite, passageText, toasts, notify, run,
-  }), [at, cite, setCite, passageText, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, updateDoc, step, collectionId, pinned,
+  }), [at, cite, setCite, passageText, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, updateDoc, updateCode, filesVersion, filesChanged, closing, inspectorView, step, collectionId, pinned,
        pinsVersion, togglePin, pinSymbol, symbolId, toasts, notify, run]);
 
   return <Context.Provider value={value}>{children}</Context.Provider>;

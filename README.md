@@ -70,7 +70,7 @@ setting. The address bar keeps the document, page and search in view, so a place
 - **Glossary:** terms and definitions from each document's "Terms and definitions" clause, and its list
   of acronyms. A search that uses an acronym also searches for what it stands for (and the reverse),
   since the language model doesn't know a document's own acronyms.
-- **Military-standard conventions:** table and figure numbers such as `TABLE 4.2-1`; tables continued
+- **Standards' conventions:** table and figure numbers such as `TABLE 4.2-1`; tables continued
   over pages ("- Continued"), with or without the heading row repeated; identifiers numbered in pairs
   (`GRP/ITM 281/001`, also under `GRP/ITM` table headings); message labels written with a space (`M 12.6`);
   page numbers as printed (`4-123`, `B-45`); appendix sections numbered in tens.
@@ -152,13 +152,32 @@ use **Add meaning search** in the Library view to re-process the documents.
 
 ## Source code
 
-The **Code** view reads a codebase the way an IDE does, for reading and tracing rather than editing.
-Source opens in an editor (the one inside VS Code, read-only): **F12** or **Ctrl/Cmd+click** on a name
-goes to its declaration, hovering shows what it refers to, and the inspector on the right follows the
-cursor with the symbol's usages, callers and callees, and hierarchy.
+The **Code** view reads a codebase the way an IDE does. Source opens in an editor (the one inside
+VS Code): **F12** or **Ctrl/Cmd+click** on a name goes to its declaration, hovering shows what it
+refers to, and the inspector on the right follows the cursor with the symbol's usages, callers and
+callees, and hierarchy.
 
 Add the top folder of the source (a path on the machine the app runs on); it's scanned in the
-background, where it is. Nothing in the folder is changed. **Rescan** reads only new and changed files.
+background, where it is. **Rescan** reads only new and changed files.
+
+**Examples as you type.** The inspector's **Examples** view follows what you're writing: after a
+pause in typing it shows real statements of the codebase that do the same kind of thing (a call of
+the same method on the same type first, then on sibling types, then the same name anywhere, then
+code from methods like the one you're in), each with its file and lines, a score and why it was
+chosen, and **Preview · Go · Insert**. Completion (`Ctrl+Space`, or after a dot) comes from the index,
+never from the text: the members of the resolved type with the number of examples each has, what's
+in scope, then symbols you could import (choosing one adds the import). Nothing is generated: every
+example is code that exists. `python -m src.evaluate_examples <set.json>` measures the ranking against
+a judged set.
+
+**Editing.** Files can be edited and saved (**Ctrl/Cmd+S**); a saved file is re-read and re-linked
+on the spot, so the inspector describes what you just wrote. Unsaved changes are marked on the tab,
+survive switching tabs and reloading the page, and are asked about when a tab is closed. A save is
+refused if the file changed on disk since it was opened (another editor, a `git pull`); the two
+versions can be compared side by side and either kept. Files keep their line endings, byte-order mark
+and encoding. The Files view creates, renames, moves and deletes files; the Text search replaces across
+the codebase after a preview. Only source files, templates and build files inside the codebase folder
+are ever written, and nothing is run: no build, no tests, no formatter.
 
 | View | What it shows |
 |---|---|

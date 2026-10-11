@@ -115,6 +115,14 @@ CODE_SKIP_FOLDERS = {           # Build output and downloaded dependencies: not 
 }                               # Folders starting with "." (.git, .gradle, .idea…) are always skipped
 CODE_MAX_FILE_BYTES = 1_000_000 # Larger source files are generated or bundled, and are skipped
 CODE_MAX_RESULTS = 300          # Symbols, lines or usages listed at once
+EXAMPLE_WEIGHTS = {             # Ranking of examples as you type (ADR-012): type compatibility, symbol similarity,
+    "T": 0.30, "M": 0.25,       # context similarity, structural similarity, example quality. Tuned by hand against
+    "C": 0.20, "P": 0.15,       # the recorded feedback (example_feedback) and the evaluation set
+    "Q": 0.10,
+}
+EXAMPLE_CANDIDATES = 200        # Call sites considered per request before ranking
+CODE_MAX_BUFFER = 2_000_000     # Characters of an unsaved buffer the server will parse for examples
+EXAMPLES_SHOWN = 20             # Ranked examples returned (the panel shows five, more on request)
 CODE_CALL_DEPTH = 4             # Levels followed in caller and callee trees
 CODE_CALL_WIDTH = 30            # Callers or callees listed per step of a tree
 CODE_CONTEXT_LINES = 40         # Lines shown either side of the line being looked at

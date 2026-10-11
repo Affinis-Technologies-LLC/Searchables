@@ -30,6 +30,9 @@ service keeps its library in `C:\ProgramData\Searchables`, separate from the one
   script finds it automatically.
 - **The project outside your user profile**, e.g. `C:\Apps\Searchables`. Folders under
   `C:\Users\<you>` aren't readable by the service account.
+- **Codebases you'll edit in the app** must be writable by the service account: give it **Modify**
+  on the codebase folder (folder → Properties → Security), or keep such codebases outside your profile
+  where the service account already has access. Reading needs only Read.
 
 ## Install
 

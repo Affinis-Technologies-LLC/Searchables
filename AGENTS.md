@@ -17,6 +17,7 @@ SQLite library and code index; a prebuilt React front end (`web/`, built into `s
 3. **Tests before changes** (ADR-009). Protect what exists; write the gaps as strict expected
    failures; a changed behaviour ships with a test that would have caught the old one.
    Run `.venv/bin/python -m pytest` (needs `requirements-dev.txt`); the browser test needs Chrome.
+   Front-end unit tests: `cd web && npm test` (also run by `npm run build`).
 4. **Keep to the recorded constraints**: everything local and offline (ADR-002); no LLM, nothing
    generated; rules that can be explained (ADR-003); additive schema changes (ADR-004); every code
    link states its certainty (ADR-006); the repository names no specific standard and uses none of
@@ -42,3 +43,4 @@ SQLite library and code index; a prebuilt React front end (`web/`, built into `s
 
 - Document search quality: `python -m src.evaluate` against the user's own queries (kept out of the repo).
 - Code linking quality: `python -m src.evaluate_code <folder>` reports the share of calls left by name, per language.
+- Examples as you type: `python -m src.evaluate_examples tests/examples_set.json` (precision@3, MRR against two baselines).

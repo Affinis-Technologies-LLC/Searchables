@@ -5,9 +5,10 @@ import { CodeTab, useApp } from "../store";
 import { Calls, CodeSymbol, SymbolDetail, Usage } from "../types";
 import { CopyButton, Empty, Icon, Segments, Status } from "../ui";
 import { CallTree, SymbolHead, SymbolLink, UsageRows } from "./common";
+import { ExamplesPanel } from "./ExamplesPanel";
 import { loadFile, useFile } from "./files";
 
-const VIEWS = ["Usages", "Calls", "Hierarchy", "Members", "File"] as const;
+const VIEWS = ["Examples", "Usages", "Calls", "Hierarchy", "Members", "File"] as const;
 const CERTAINTY: [Usage["certainty"], string, string][] = [
   ["resolved", "Linked", "Followed through imports, declared types or scope."],
   ["supertype", "Through a supertype", "Calls made through an interface or superclass method that this one implements or overrides."],
@@ -17,7 +18,8 @@ const CERTAINTY: [Usage["certainty"], string, string][] = [
 /** Beside the source: the symbol under the cursor — its usages, callers and callees, hierarchy — and the file's outline. */
 export function CodeInspector({ tab }: { tab: CodeTab }) {
   const app = useApp();
-  const [view, setView] = useState<(typeof VIEWS)[number]>("Usages");
+  const view = (VIEWS as readonly string[]).includes(app.inspectorView) ? app.inspectorView as (typeof VIEWS)[number] : "Usages";
+  const setView = app.setInspectorView;
   const file = useFile(tab.fileId);
   const detail = useLoad<SymbolDetail>(() => (app.symbolId !== null ? api.get(`/code/symbols/${app.symbolId}`) : null), [app.symbolId]);
   const symbol = detail.data?.symbol ?? null;
@@ -52,7 +54,8 @@ export function CodeInspector({ tab }: { tab: CodeTab }) {
         <Status loading={detail.loading && !detail.data} error={detail.error} />
         {loose && file.data && <Loose codebaseId={file.data.file.codebase_id} target={loose.ref!.target} candidates={loose.candidates} />}
         {!loose && view === "File" && <FileView tab={tab} />}
-        {!loose && view !== "File" && !symbol && !detail.loading && (
+        {!loose && view === "Examples" && <ExamplesPanel />}
+        {!loose && view !== "File" && view !== "Examples" && !symbol && !detail.loading && (
           <Empty>Put the cursor on a name in the source, or pick a symbol from the search or the file's outline, to see
             where it's used, what calls it and what it calls.</Empty>
         )}
