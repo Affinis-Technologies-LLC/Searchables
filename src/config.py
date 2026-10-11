@@ -123,6 +123,7 @@ EXAMPLE_WEIGHTS = {             # Ranking of examples as you type (ADR-012): typ
 EXAMPLE_CANDIDATES = 200        # Call sites considered per request before ranking
 CODE_MAX_BUFFER = 2_000_000     # Characters of an unsaved buffer the server will parse for examples
 EXAMPLES_SHOWN = 20             # Ranked examples returned (the panel shows five, more on request)
+CODE_LIBRARY_PUBLIC = False     # Unused-code view (ADR-019): count public Java methods of exported types as used (the codebase is a library)
 CODE_CALL_DEPTH = 4             # Levels followed in caller and callee trees
 CODE_CALL_WIDTH = 30            # Callers or callees listed per step of a tree
 CODE_CONTEXT_LINES = 40         # Lines shown either side of the line being looked at

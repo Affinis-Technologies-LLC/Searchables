@@ -6,10 +6,13 @@ Searchables/
 │       ├── App.tsx             # Sign-in, then the workbench: views | tabs | inspector | status bar
 │       ├── store.tsx           # Shared state: overview, open tabs, navigation history, pins
 │       ├── api.ts, types.ts    # Calls to the server and the shapes it returns
-│       ├── shell/              # Sign-in page, activity bar, tab bar, status bar
+│       ├── shell/              # Sign-in page, activity bar, tab bar, status bar, About
+│       ├── help/               # Help inside the app: the pages (from docs/help), the Markdown reader, the panel and view
 │       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library
 │       └── code/               # Code panel (search and replace, files, dependencies, APIs), editor with saving (drafts.ts, editing.ts), inspector, Examples view (assistant.ts)
 ├── .streamlit/, app.py         # The earlier Streamlit interface (with src/ui/), kept until the new one has been tried
+├── VERSION                     # The app's version; a release is a bump, a commit and a tag (ADR-016)
+├── docs/                       # ADRs (docs/adr), the roadmap, and the help pages bundled into the app (docs/help)
 ├── README.md                   # Overview, setup, meaning-search model, data and configuration
 ├── requirements.txt            # What the app needs (ranges)
 ├── requirements.lock           # Generated from it: exact versions and hashes, which the scripts install
@@ -49,6 +52,15 @@ Searchables/
 │   │   ├── context.py          # What's being written: the unsaved buffer at the cursor, parsed and resolved (ADR-012)
 │   │   ├── examples.py         # Examples for it: candidate filters and the ranking
 │   │   ├── complete.py         # Completion from the index
+│   │   ├── patterns.py         # The Patterns view: what's usual in a codebase, counted from the index (ADR-013)
+│   │   ├── classfiles.py       # Java library symbols read from class files in the JDK and local jars, no JVM (ADR-017)
+│   │   ├── impact.py           # Change impact: the closure over callers by layer, with routes and tests (ADR-018)
+│   │   ├── unused.py           # Dead and unreachable code, with certainty (ADR-019)
+│   │   ├── signatures.py       # Signature-aware search over the stored types (ADR-019)
+│   │   ├── snapshots.py        # Index snapshots and structural diffs (ADR-020)
+│   │   ├── checks.py           # Convention checks from mined patterns (ADR-021)
+│   │   ├── git.py              # git status, diff, log and commit, the one program the app starts (ADR-015)
+│   │   ├── rename.py           # Rename a symbol with a preview, applied only where chosen (ADR-015)
 │   │   ├── manifests.py        # Declared libraries (package.json, pom.xml, build.gradle) and tsconfig import aliases
 │   │   └── models.py           # Codebase, Symbol, Usage, Dependency, Endpoint, …
 │   ├── extractor/
@@ -66,6 +78,8 @@ Searchables/
 │   │   └── query.py            # User query → safe FTS5 query (phrases, OR, NOT, prefix; all or some of the words)
 │   ├── research/
 │   │   ├── __init__.py
+│   │   ├── tables_as_code.py   # A table as an enum or TypeScript constants, compared with the code's enum (ADR-022)
+│   │   ├── trace.py            # Catalogue identifiers ↔ code, as labelled mentions (ADR-014)
 │   │   ├── assess.py           # Same-topic assessment rules: values, shall/should/may, negation, identifiers
 │   │   ├── collections.py      # Collections of pins (self-contained copies of passages/tables)
 │   │   ├── compare.py          # Edition comparison: clause pairing, word diffs, provision changes

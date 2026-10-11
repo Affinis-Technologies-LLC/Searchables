@@ -19,5 +19,16 @@ to them or supersedes them knowingly.
 | [ADR-010](adr-010-type-resolution-and-framework-rules.md) | Type resolution without a compiler, and Angular/React conventions as rules (roadmap step 1, built) |
 | [ADR-011](adr-011-writable-editor.md) | The writable editor, what the server may write, and the index on save (roadmap step 2, built) |
 | [ADR-012](adr-012-examples-and-completion.md) | Examples as you type and completion from the index — context, filters, ranking, evaluation set (roadmap step 3, built) |
+| [ADR-013](adr-013-patterns-view.md) | The Patterns view: idioms, how things are made, pairs, entry points and layers, hotspots, conventions, framework views (roadmap step 4, built) |
+| [ADR-014](adr-014-traceability.md) | Traceability between Catalogue identifiers and code, as labelled mentions (roadmap step 13, built) |
+| [ADR-015](adr-015-git-and-rename.md) | Git status, diff and commit (never push); rename symbol with a preview (roadmap step 14, built) |
+| [ADR-016](adr-016-version-about-and-help.md) | A version, an About, and Help inside the app (roadmap step 5, built) |
+| [ADR-017](adr-017-java-library-symbols.md) | Java library symbols read from class files: JDK and declared jars, no JVM (roadmap step 6, built) |
+| [ADR-018](adr-018-change-impact.md) | The change-impact view: the closure over callers by layer, with routes and tests (roadmap step 7, built) |
+| [ADR-019](adr-019-dead-code-and-signature-search.md) | Dead and unreachable code with certainty; signature-aware search (roadmap step 8, built) |
+| [ADR-020](adr-020-index-snapshots.md) | Index snapshots, diffed: added, removed, changed, moved symbols and the callers affected (roadmap step 9, built) |
+| [ADR-021](adr-021-convention-checks.md) | Convention checks from mined patterns, in a Checks segment and as editor markers (roadmap step 10, built) |
+| [ADR-022](adr-022-tables-as-data.md) | Tables as data: a standard's table as an enum, compared with the enum the code has (roadmap step 11, built) |
+| [ADR-023](adr-023-typescript-language-service.md) | A TypeScript language service: not built; added only if the measured by-name share on real code exceeds 25 %; `.d.ts` reading preferred first (roadmap step 12) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

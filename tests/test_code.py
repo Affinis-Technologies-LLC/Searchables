@@ -259,7 +259,8 @@ def test_java_chained_calls_follow_return_types(store, code):
     assert by_name["orElse"]["target"] == "java.util.Optional#orElse"
     service = next(f for f in store.files(code.id) if f.path.endswith("UserService.java"))
     rows = {r["name"]: r for r in store.conn.execute("SELECT name, target FROM code_refs WHERE file_id = ? AND line = 13", (service.id,))}
-    assert rows["stream"]["target"] == "java.util.List#stream" and rows["filter"]["target"] == "java.util.stream.Stream#filter"
+    # With a JDK on the machine (ADR-017) the member is named by the class declaring it, Collection; without, by the carrier table
+    assert rows["stream"]["target"] in ("java.util.List#stream", "java.util.Collection#stream") and rows["filter"]["target"] == "java.util.stream.Stream#filter"
 
 
 def test_java_symbols_know_their_types(store, code):

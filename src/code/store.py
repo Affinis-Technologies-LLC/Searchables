@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from src import config
-from src.code import manifests, templates
+from src.code import classfiles, manifests, templates
 from src.code.models import (BY_NAME, RESOLVED, SUPERTYPE, CallNode, Codebase, CodeFile, Dependency, Endpoint,
                              Hierarchy, Symbol, Usage)
 from src.code.parser import JAVA, TYPE_KINDS, ParsedFile, language_of, parse
@@ -142,6 +142,59 @@ CREATE TABLE IF NOT EXISTS code_deps (
     version     TEXT NOT NULL,
     scope       TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_jars (          -- Library archives read for their public API (ADR-017), shared by codebases
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    size        INTEGER NOT NULL,
+    mtime       REAL NOT NULL,
+    classes     INTEGER NOT NULL DEFAULT 0,
+    read_at     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_library (       -- Classes and public members of those archives
+    id          INTEGER PRIMARY KEY,
+    jar_id      INTEGER NOT NULL REFERENCES code_jars(id) ON DELETE CASCADE,
+    qualified   TEXT NOT NULL,                  -- The class, dotted; members: "class#member"
+    kind        TEXT NOT NULL,                  -- class, interface, enum, annotation, method, constructor, field
+    name        TEXT NOT NULL,
+    owner       TEXT NOT NULL DEFAULT '',       -- Members: their class
+    params      INTEGER NOT NULL DEFAULT -1,
+    returns     TEXT NOT NULL DEFAULT '',       -- Erased class, "$T" for the class's first type variable, '' otherwise
+    carried     TEXT NOT NULL DEFAULT '',       -- First type argument of the return type: a class, "$T" or ''
+    is_static   INTEGER NOT NULL DEFAULT 0,
+    signature   TEXT NOT NULL DEFAULT '',
+    supers      TEXT NOT NULL DEFAULT '',       -- Classes: supertypes, comma-separated
+    type_params TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS code_library_qualified ON code_library(qualified);
+CREATE INDEX IF NOT EXISTS code_library_owner ON code_library(owner, name);
+CREATE INDEX IF NOT EXISTS code_library_name ON code_library(name) ;
+CREATE TABLE IF NOT EXISTS code_codebase_jars (  -- Which archives a codebase sees: its declared dependencies and the JDK
+    codebase_id INTEGER NOT NULL REFERENCES codebases(id) ON DELETE CASCADE,
+    jar_id      INTEGER NOT NULL REFERENCES code_jars(id) ON DELETE CASCADE,
+    PRIMARY KEY (codebase_id, jar_id)
+);
+CREATE TABLE IF NOT EXISTS code_snapshots (     -- The index as it was (ADR-020)
+    id           INTEGER PRIMARY KEY,
+    codebase_id  INTEGER NOT NULL REFERENCES codebases(id) ON DELETE CASCADE,
+    label        TEXT NOT NULL,
+    taken_at     TEXT NOT NULL,
+    symbol_count INTEGER NOT NULL DEFAULT 0,
+    by_name      INTEGER NOT NULL DEFAULT 0     -- Calls left by name at the time
+);
+CREATE TABLE IF NOT EXISTS code_snapshot_symbols (
+    snapshot_id INTEGER NOT NULL REFERENCES code_snapshots(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    qualified   TEXT NOT NULL,
+    params      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    signature   TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    line        INTEGER NOT NULL,
+    exported    INTEGER NOT NULL,
+    callers     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS code_snapshot_symbols_snapshot ON code_snapshot_symbols(snapshot_id);
 CREATE TABLE IF NOT EXISTS code_endpoints (
     id          INTEGER PRIMARY KEY,
     codebase_id INTEGER NOT NULL REFERENCES codebases(id) ON DELETE CASCADE,
@@ -396,8 +449,10 @@ class CodeStore:
             found = manifests.read_aliases(_read_text(root / relative))
             if found:
                 aliases.append((posixpath.dirname(relative), *found))
+        libraries_changed = self._read_libraries(codebase_id, on_progress) if any(f["language"] == JAVA for f in
+                                                                                  self.conn.execute("SELECT language FROM code_files WHERE codebase_id = ? LIMIT 10000", (codebase_id,))) else False
         self._linkers.pop(codebase_id, None)   # A rescan starts afresh
-        if changed or removed or not codebase.indexed_at:   # Otherwise every link still stands
+        if changed or removed or libraries_changed or not codebase.indexed_at:   # Otherwise every link still stands
             _Linker(self.conn, codebase_id, aliases).run(on_progress)
 
         files, symbols = self.conn.execute(
@@ -437,6 +492,64 @@ class CodeStore:
             with self.conn:
                 self.conn.execute("UPDATE code_components SET template_file = ? WHERE symbol_id = ?", (file_id, row["symbol_id"]))
         return kept
+
+    # ---- Libraries (ADR-017) ---------------------------------------------------------------
+
+    def _read_libraries(self, codebase_id: int, on_progress: Optional[StageCallback]) -> bool:
+        """
+        Reads the public API of the JDK and of the declared dependencies found in the local Maven and
+        Gradle caches, once per archive. Returns whether the codebase's set of archives changed.
+        """
+        if os.environ.get("SEARCHABLES_LIBRARIES", "1") == "0":   # Switched off (the test suite does, where libraries aren't the point)
+            archives: List[Path] = []
+        else:
+            archives = classfiles.jdk_archives(classfiles.jdk_home())
+        for row in self.conn.execute("SELECT ecosystem, name, version FROM code_deps WHERE codebase_id = ? AND ecosystem IN ('maven', 'gradle')", (codebase_id,)):
+            group, _, artifact = row["name"].partition(":")
+            jar = classfiles.find_jar(group, artifact, row["version"])
+            if jar is not None:
+                archives.append(jar)
+        before = {row["jar_id"] for row in self.conn.execute("SELECT jar_id FROM code_codebase_jars WHERE codebase_id = ?", (codebase_id,))}
+        jar_ids = []
+        for i, archive in enumerate(archives):
+            try:
+                stat = archive.stat()
+            except OSError:
+                continue
+            row = self.conn.execute("SELECT id, size, mtime FROM code_jars WHERE path = ?", (str(archive),)).fetchone()
+            if row is not None and row["size"] == stat.st_size and abs(row["mtime"] - stat.st_mtime) < 1:
+                jar_ids.append(row["id"])
+                continue
+            if on_progress:
+                on_progress("Reading libraries", i, len(archives))
+            with self.conn:
+                if row is not None:
+                    self.conn.execute("DELETE FROM code_jars WHERE id = ?", (row["id"],))
+                jar_id = self.conn.execute("INSERT INTO code_jars (path, size, mtime, classes, read_at) VALUES (?, ?, ?, 0, ?)",
+                                           (str(archive), stat.st_size, stat.st_mtime, datetime.now().isoformat(timespec="seconds"))).lastrowid
+                count, rows = _archive_rows(archive, stat)
+                self.conn.executemany(
+                    "INSERT INTO code_library (jar_id, qualified, kind, name, owner, params, returns, carried, is_static, signature, supers, type_params) "
+                    f"VALUES ({jar_id}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                self.conn.execute("UPDATE code_jars SET classes = ? WHERE id = ?", (count, jar_id))
+            jar_ids.append(jar_id)
+        with self.conn:
+            self.conn.execute("DELETE FROM code_codebase_jars WHERE codebase_id = ?", (codebase_id,))
+            self.conn.executemany("INSERT OR IGNORE INTO code_codebase_jars (codebase_id, jar_id) VALUES (?, ?)", [(codebase_id, j) for j in jar_ids])
+        return set(jar_ids) != before
+
+    def snapshots(self, codebase_id: int) -> list:
+        from src.code.snapshots import Snapshot
+        return [Snapshot(r["id"], r["codebase_id"], r["label"], r["taken_at"], r["symbol_count"])
+                for r in self.conn.execute("SELECT * FROM code_snapshots WHERE codebase_id = ? ORDER BY id", (codebase_id,))]
+
+    def delete_snapshot(self, snapshot_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM code_snapshots WHERE id = ?", (snapshot_id,))
+
+    def libraries(self, codebase_id: int) -> List[sqlite3.Row]:
+        return self.conn.execute("SELECT j.* FROM code_jars j JOIN code_codebase_jars c ON c.jar_id = j.id WHERE c.codebase_id = ? ORDER BY j.path",
+                                 (codebase_id,)).fetchall()
 
     def _delete_file(self, file_id: int) -> None:
         self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (file_id,))
@@ -1072,6 +1185,32 @@ class CodeStore:
         return served, [c for c in clients if c.id not in matched]
 
 
+_archives: Dict[Tuple[str, int, float], Tuple[int, list]] = {}   # Archives read in this process, so a second library needn't re-read them
+
+
+def _archive_rows(archive: Path, stat: os.stat_result) -> Tuple[int, list]:
+    """(class count, code_library rows without the jar id) for an archive, read once per process."""
+    key = (str(archive), stat.st_size, stat.st_mtime)
+    if key in _archives:
+        return _archives[key]
+    count, rows = 0, []
+    for info in classfiles.read_archive(archive):
+        count += 1
+        rows.append((info.qualified, info.kind, info.qualified.rsplit(".", 1)[-1], "", -1, "", "", 0, "",
+                     ",".join(info.supers), ",".join(info.type_params)))
+        seen = set()
+        for m in info.members:
+            if (m.name, m.params) in seen:   # Overloads of the same arity: one is enough to resolve a call
+                continue
+            seen.add((m.name, m.params))
+            rows.append((f"{info.qualified}#{m.name}", m.kind, m.name, info.qualified, m.params, m.returns, m.carried,
+                         int(m.static), m.signature, "", ""))
+    if len(_archives) > 8:
+        _archives.clear()
+    _archives[key] = (count, rows)
+    return _archives[key]
+
+
 def _file(row: sqlite3.Row) -> CodeFile:
     return CodeFile(row["id"], row["codebase_id"], row["path"], row["language"], row["package"], row["lines"],
                     bool(row["has_errors"]), row["sha256"])
@@ -1181,6 +1320,7 @@ class _Linker:
         self.affected: Set[int] = set()                                # Symbol ids a refresh replaced or added
         self.renamed: Set[str] = set()                                 # Names a refresh (re)declared
         self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
+        self._load_libraries()
         for symbol_id in sorted(self.symbols):
             self._add_symbol(symbol_id)
         self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
@@ -1192,6 +1332,41 @@ class _Linker:
             elif row["target"]:
                 self.external_supers[row["from_symbol"]].append(row["target"])
         self.loaded = True
+
+    def _load_libraries(self) -> None:
+        """The public API of the archives this codebase sees (ADR-017): classes, their members, simple names."""
+        self.lib_classes: Dict[str, sqlite3.Row] = {}
+        self.lib_members: Dict[str, Dict[str, List[sqlite3.Row]]] = defaultdict(lambda: defaultdict(list))
+        self.lib_simple: Dict[str, List[str]] = defaultdict(list)
+        for row in self.conn.execute(
+                "SELECT l.* FROM code_library l JOIN code_codebase_jars c ON c.jar_id = l.jar_id WHERE c.codebase_id = ? ORDER BY l.id",
+                (self.codebase_id,)):
+            if row["owner"]:
+                self.lib_members[row["owner"]][row["name"]].append(row)
+            else:
+                self.lib_classes.setdefault(row["qualified"], row)
+                self.lib_simple[row["name"]].append(row["qualified"])
+
+    def _lib_member(self, owner: str, name: str, args: int = -1, kinds: Tuple[str, ...] = ("method", "field"),
+                    seen: Optional[Set[str]] = None) -> Optional[Tuple[str, sqlite3.Row]]:
+        """A member of a library class or its supertypes: (declaring class, member)."""
+        seen = seen if seen is not None else set()
+        if owner in seen or owner not in self.lib_classes:
+            return None
+        seen.add(owner)
+        candidates = [m for m in self.lib_members[owner].get(name, []) if m["kind"] in kinds]
+        if candidates:
+            return owner, next((m for m in candidates if args >= 0 and m["params"] == args), candidates[0])
+        for parent in self.lib_classes[owner]["supers"].split(","):
+            found = self._lib_member(parent, name, args, kinds, seen) if parent else None
+            if found is not None:
+                return found
+        return None
+
+    def _outside_member(self, owner: str, name: str, args: int = -1) -> str:
+        """"pkg.Class#member", with the class that declares the member when a library knows it."""
+        found = self._lib_member(owner, name, args)
+        return f"{found[0]}#{name}" if found else f"{owner}{'.' if '#' in owner else '#'}{name}"
 
     def _add_symbol(self, symbol_id: int) -> None:
         s = self.symbols[symbol_id]
@@ -1470,7 +1645,7 @@ class _Linker:
                 if ref["kind"] == "new":
                     return self._method(owner, ref["name"], ref["args"], ("constructor",)) or None
             elif isinstance(owner, str) and ref["kind"] != "new":
-                return f"{owner}{'.' if '#' in owner else '#'}{ref['name']}"
+                return self._outside_member(owner, ref["name"], ref["args"]) if java else f"{owner}{'.' if '#' in owner else '#'}{ref['name']}"
         return self._link_java(ref) if java else self._link_script(ref)
 
     def _type_of(self, symbol_id: int) -> Tuple[Target, str]:
@@ -1507,6 +1682,16 @@ class _Linker:
 
     def _carrier_step(self, owner: str, member: str, carried: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str]:
         """What a member of a carrier type gives back: the same carrier, what it carries, or another carrier."""
+        found = self._lib_member(owner, member) if java else None
+        if found is not None:   # A library class (ADR-017): its member's return type, with type variables followed
+            _, row = found
+            returns, gives_carried = row["returns"], row["carried"]
+            if returns == "$T":
+                return self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+            if not returns:
+                return None, ""
+            new_carried = carried if gives_carried == "$T" else gives_carried
+            return returns, new_carried
         base = owner.split("#")[-1].split(".")[-1]
         gives = _CARRIERS.get(base, {}).get(member)
         if gives is None:
@@ -1603,10 +1788,16 @@ class _Linker:
             qualified = f"{prefix}.{name}" if prefix else name
             if qualified in self.java_types:
                 return self.java_types[qualified]
+        outside = [p for p in self.java_wild[file_id] if p not in self.java_packages]
+        if self.lib_classes:   # A library class, through the wildcard imports, the package, or java.lang (ADR-017)
+            for prefix in (*outside, "java.lang"):
+                if f"{prefix}.{name}" in self.lib_classes:
+                    return f"{prefix}.{name}"
+            if "." in name and name in self.lib_classes:
+                return name
         if name in _JAVA_LANG:
             return f"java.lang.{name}"
         # Not declared here: with a single outside "import x.y.*", that's the only place left it can come from
-        outside = [p for p in self.java_wild[file_id] if p not in self.java_packages]
         return f"{outside[0]}.{name}" if len(outside) == 1 else None
 
     def _link_java(self, ref: sqlite3.Row) -> Target:
@@ -1649,7 +1840,7 @@ class _Linker:
         owner = self._java_type(receiver, file_id, within)
         if isinstance(owner, int):
             return self._method(owner, name, args)
-        return f"{owner}#{name}" if owner else None
+        return self._outside_member(owner, name, args) if owner else None
 
     def _binding(self, file_id: int, name: str) -> Tuple[Target, Optional[int]]:
         """What a name stands for in a JS/TS file: (a symbol or external name, or else the module file it is)."""

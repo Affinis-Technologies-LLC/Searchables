@@ -16,7 +16,10 @@ os.environ["SEARCHABLES_MODEL_DIR"] = str(_ROOT / "models")
 
 import numpy as np
 import pymupdf
+import os
 import pytest
+
+os.environ.setdefault("SEARCHABLES_LIBRARIES", "0")   # Library symbols (ADR-017) only in the tests about them
 
 from src import config
 from src.extractor.pdf import PDFExtractor

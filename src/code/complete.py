@@ -80,6 +80,26 @@ def complete_at(store: CodeStore, context: Context, limit: int = LIMIT) -> List[
             return []
         if type_ref.id is not None:
             items = _member_items(store, linker, type_ref.id, partial, counts)
+        elif java and type_ref.qualified in linker.lib_classes:
+            # A library class (ADR-017): its public members and inherited ones, with the codebase's examples of each
+            seen_owner: Set[str] = set()
+            owners = [type_ref.qualified]
+            while owners:
+                owner = owners.pop(0)
+                if owner in seen_owner or owner not in linker.lib_classes:
+                    continue
+                seen_owner.add(owner)
+                for name, members in linker.lib_members[owner].items():
+                    if not _matches(name, partial):
+                        continue
+                    for m in members:
+                        if m["kind"] in ("method", "field") and not any(i.name == name and i.params == m["params"] for i in items):
+                            target = f"{owner}#{name}"
+                            n = store.conn.execute("SELECT COUNT(*) FROM code_refs WHERE codebase_id = ? AND target = ? AND kind = 'call'",
+                                                   (context.codebase_id, target)).fetchone()[0]
+                            items.append(Item(name, "api", m["params"], m["signature"],
+                                              m["returns"].rsplit(".", 1)[-1] if m["returns"] and m["returns"] != "$T" else "", n, owner))
+                owners += [p for p in linker.lib_classes[owner]["supers"].split(",") if p]
         else:
             # An outside API: the members the codebase has been seen to use on it
             prefix = type_ref.qualified + ("." if "#" in type_ref.qualified else "#")

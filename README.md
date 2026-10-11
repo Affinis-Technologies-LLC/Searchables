@@ -160,6 +160,38 @@ callees, and hierarchy.
 Add the top folder of the source (a path on the machine the app runs on); it's scanned in the
 background, where it is. **Rescan** reads only new and changed files.
 
+**Git and rename.** The Code panel's **Git** segment shows the branch, the changed files, each
+file's diff, and commits with a message; `git` is the one program the app starts, for status, diff,
+log and commit only, never push. **Rename…** on a symbol previews every place the name would change,
+with its certainty, and changes only the places you tick; methods that override one another are
+renamed together.
+
+**Change impact, unused code, changes, checks.** The inspector's **Impact** view lists everything
+that reaches a symbol through calls, by layer, with the routes and tests among them. The Code
+panel's **Unused** segment lists what nothing references (with certainty), **Changes** diffs a
+snapshot of the index against the index now (or two codebases), **Checks** flags what breaks the
+codebase's own patterns, and the search's **Signature** mode finds symbols by what they take and
+return.
+
+**Library symbols.** On Java codebases the index also reads the public API of the JDK (`java.base`
+and a few more modules, from a JDK's `jmods` folder) and of the dependencies the build declares that
+are in the local Maven or Gradle cache, straight from the class files: no JVM, nothing run,
+nothing downloaded. Calls through library types then resolve (`users.stream().filter(…)`,
+`System.out.println`) and completion on a library type lists its members. The JDK is found through
+`SEARCHABLES_JAVA_HOME`, `JAVA_HOME` or the usual install folders; the caches through
+`SEARCHABLES_MAVEN_REPO` and `SEARCHABLES_GRADLE_CACHE`.
+
+**Patterns.** The Code panel's **Patterns** segment shows what's usual in a codebase, counted from
+the index: idioms per type (what's called on it, in what order), how types are obtained, calls that
+go together, entry points and layers, hotspots, naming and test conventions, how errors are raised,
+and the Angular/React structure. Every row opens the places it was counted from; nothing rests on a
+by-name link.
+
+**Help inside the app.** `F1` opens the help page of the view you're in; the **?** on each view does
+the same; **Account → About** shows the version, the commit, where the library is, and the bundled
+software, with a **Copy** button for bug reports. The help pages are in `docs/help/` and are built
+into the interface, so they work offline and match the build.
+
 **Examples as you type.** The inspector's **Examples** view follows what you're writing: after a
 pause in typing it shows real statements of the codebase that do the same kind of thing (a call of
 the same method on the same type first, then on sibling types, then the same name anywhere, then
@@ -251,6 +283,7 @@ code the folders skipped, the largest file read, and how deep call trees go.
 |---|---|---|
 | `SEARCHABLES_DATA_DIR` | `data/` in the project | Where the library is kept |
 | `SEARCHABLES_MODEL_DIR` | `models/` in the project | Where the meaning-search model is kept |
+| `SEARCHABLES_JAVA_HOME`, `SEARCHABLES_MAVEN_REPO`, `SEARCHABLES_GRADLE_CACHE` | `JAVA_HOME` or the usual folders; `~/.m2/repository`; `~/.gradle/caches/modules-2/files-2.1` | Where Java library class files are read from; `SEARCHABLES_LIBRARIES=0` switches that off |
 
 ## Checking search quality
 

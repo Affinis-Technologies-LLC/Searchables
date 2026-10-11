@@ -196,6 +196,37 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     panel.locator(".card", has_text="/api/users/{id}").wait_for()
     assert "← GET /api/users/{}" in panel.locator(".card", has_text="/api/users/{id}").inner_text()
 
+    # Patterns: what's usual in the codebase, each row opening the places it was counted from
+    panel.locator(".segments button", has_text="Patterns").click()
+    panel.get_by_label("Pattern").select_option("Hotspots")
+    hot = panel.locator(".pattern-row").first
+    hot.wait_for()
+    hot.click()
+    panel.locator(".pattern .examples .code-row").first.click()
+    expect(page.locator(".tab.on")).to_contain_text(".")
+
+    # Help: F1 opens the page for the view you're in; the ? on a view opens its page; About shows the version
+    from src import version
+    page.keyboard.press("F1")
+    expect(page.locator(".tab.on")).to_contain_text("Help · Code")
+    expect(page.locator(".help-page h1")).to_have_text("Code")
+    page.locator(".activity-bar button", has_text="Help").click()
+    expect(page.locator(".help-page h1")).to_have_text("Help")
+    page.locator(".help-page a.link", has_text="Library").first.click()
+    expect(page.locator(".help-page h1")).to_have_text("Library")
+    page.locator(".side-pane:not([hidden])").get_by_label("Search the help").fill("acronym")
+    page.locator(".side-pane:not([hidden]) .tree-row", has_text="Glossary").click()
+    expect(page.locator(".help-page h1")).to_have_text("Glossary")
+    page.locator(".activity-bar button", has_text="Search").click()
+    page.locator(".side-pane:not([hidden]) .help-button").click()
+    expect(page.locator(".help-page h1")).to_have_text("Search")
+    page.get_by_role("button", name="Account").click()
+    page.get_by_role("button", name="About").click()
+    about = page.get_by_role("dialog", name="About Searchables")
+    expect(about.locator(".about-lines")).to_contain_text(f"Searchables {version.VERSION}")
+    expect(about.locator(".about-lines")).to_contain_text("Library:")
+    about.get_by_role("button", name="Close").click()
+
     # A reload keeps the session; signing out ends it
     page.reload()
     page.wait_for_selector(".activity-bar")

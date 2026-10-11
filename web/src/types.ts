@@ -59,6 +59,8 @@ export interface Job {
 }
 
 export interface Overview {
+  version: string;
+  commit: string;
   documents: DocumentInfo[];
   collections: Collection[];
   codebases: Codebase[];
@@ -288,6 +290,14 @@ export interface CompletionItem {
   insert_import: string | null; symbol_id: number | null;
 }
 
+export interface About {
+  version: string; commit: string; checkout: boolean; data_dir: string;
+  model: { name: string; revision: string; dir: string; present: boolean; device: string };
+  ocr: boolean; python: string; platform: string;
+  counts: { documents: number; codebases: number; collections: number; pins: number };
+  python_packages: { name: string; version: string; licence: string }[];
+}
+
 export interface ReplacePreview { changes: { file_id: number; path: string; sha256: string; count: number; text: string }[] }
 
 export interface At { ref: Usage | null; target: CodeSymbol | null; declared: CodeSymbol | null; candidates: CodeSymbol[] }
@@ -362,3 +372,98 @@ export interface CatalogueChanges {
 }
 
 export interface HealthCheck { name: string; value: string; note: string; warn: boolean }
+
+// ---- Patterns (ADR-013)
+
+export interface Where { file_id: number; path: string; line: number; enclosing: string }
+export interface PatternMember { name: string; calls: number; examples: Where[] }
+export interface PatternPair { first: string; second: string; methods: number; examples: Where[]; support: number; confidence: number; of: number }
+export interface Idiom { type_id: number; type_name: string; qualified: string; call_sites: number; members: PatternMember[]; pairs: PatternPair[] }
+export interface Made { type_id: number; type_name: string; qualified: string; constructed: number; injected: number; factory: number; examples: Where[] }
+export interface ChainNode { symbol: string; symbol_id: number; line: number; children: ChainNode[] }
+export interface EntryPoint { route: string; handler: string; handler_id: number | null; file_id: number; path: string; line: number; chain: ChainNode[] }
+export interface HotSymbol { symbol_id: number; name: string; qualified: string; kind: string; references: number; examples: Where[] }
+export interface HotFile { file_id: number; path: string; references: number }
+export interface Naming { package: string; suffix: string; count: number; total: number; examples: Where[] }
+export interface Raised { type_name: string; count: number; examples: Where[] }
+export interface AngularComponent {
+  symbol_id: number; name: string; selector: string; template: string; inputs: string[]; outputs: string[]; injected: string[]; renders: string[];
+  file_id: number; path: string; line: number;
+}
+export interface ReactComponent { symbol_id: number; name: string; renders: string[]; hooks: string[]; file_id: number; path: string; line: number }
+export interface Patterns {
+  idioms: Idiom[]; made: Made[]; pairs: PatternPair[]; entry_points: EntryPoint[]; layers: string[];
+  hot_symbols: HotSymbol[]; hot_files: HotFile[]; naming: Naming[]; test_folders: string[]; errors: Raised[];
+  angular: AngularComponent[]; react: ReactComponent[];
+}
+
+
+// ---- Change impact (ADR-018)
+
+export interface ImpactNode {
+  symbol_id: number; qualified: string; kind: string; file_id: number; path: string; line: number; depth: number;
+  certainty: Usage["certainty"]; via: number; via_line: number;
+}
+export interface Impact {
+  symbol: CodeSymbol;
+  nodes: ImpactNode[];
+  layers: { layer: string; nodes: ImpactNode[] }[];
+  routes: { route: string; handler: string; handler_id: number; depth: number }[];
+  tests: { file_id: number; path: string; symbols: string[] }[];
+  truncated: boolean;
+  by_name_included: boolean;
+}
+
+// ---- Unused code (ADR-019)
+
+export interface UnusedItem { symbol: CodeSymbol; certainty: "none" | "name"; by_name_references: number }
+export interface UnusedReport {
+  methods: UnusedItem[];
+  by_name_only: UnusedItem[];
+  routes: { route: string; handler: CodeSymbol | null; file_id: number; path: string; line: number }[];
+  exports: UnusedItem[];
+  types: UnusedItem[];
+}
+
+// ---- Snapshots and diffs (ADR-020)
+
+export interface Snapshot { id: number; codebase_id: number; label: string; taken_at: string; symbol_count: number }
+export interface IndexDiff {
+  added: CodeSymbol[];
+  removed: CodeSymbol[];
+  changed: { now: CodeSymbol; before_signature: string; before_type: string; callers: Usage[] }[];
+  moved: { now: CodeSymbol; before_path: string }[];
+  removed_callers: Record<string, number>;
+  removed_by_name_now: Record<string, number>;
+  by_name_before: number;
+  by_name_now: number;
+  against: string;
+}
+
+
+// ---- Convention checks (ADR-021)
+
+export interface Finding { kind: string; symbol: CodeSymbol; file_id: number; path: string; line: number; message: string; examples: Where[]; confidence: number }
+
+
+// ---- Tables as data (ADR-022)
+
+export interface TableAsCode { name: string; language: string; text: string; constants: string[]; columns: string[]; classes: string[] }
+export interface EnumComparison {
+  enum: CodeSymbol; matched: string[]; missing_in_code: string[]; extra_in_code: string[];
+  extra: { name: string; symbol_id: number; line: number }[]; value_mismatches: [string, string][];
+}
+
+
+// ---- Traceability as mentions (ADR-014)
+
+export interface CodeMention { codebase_id: number; file_id: number; path: string; line: number; text: string; certainty: "exact" | "name"; symbol: string }
+export interface FileIdentifier { identifier: string; line: number; certainty: "exact" | "name"; text: string }
+
+// ---- Git and rename (ADR-015)
+
+export interface GitInfo { repository: boolean; branch: string; entries: { path: string; status: string; old_path: string }[]; reason: string }
+export interface GitCommit { commit: string; author: string; date: string; message: string }
+export interface RenameEdit { key: string; file_id: number; path: string; line: number; col: number; text: string; certainty: string; selected: boolean; symbol: string }
+export interface RenamePreview { symbol: CodeSymbol; new_name: string; edits: RenameEdit[]; also: CodeSymbol[] }
+export interface RenameResult { files: CodeFile[]; skipped: { key: string; path: string; line: number; reason: string }[]; edits_applied: number }

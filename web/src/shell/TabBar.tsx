@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { drafts } from "../code/drafts";
 import { saveFile } from "../code/editing";
+import { titleOf } from "../help/pages";
 import { Tab, useApp } from "../store";
 import { Icon } from "../ui";
 
@@ -10,7 +11,8 @@ export function TabBar() {
   const unsaved = new Set(dirty.split(",").filter(Boolean).map(Number));
   const title = (tab: Tab) =>
     tab.kind === "doc" ? app.overview.documents.find((d) => d.id === tab.docId)?.title ?? "Document"
-                       : tab.path.split("/").pop() ?? tab.path;
+    : tab.kind === "help" ? `Help · ${titleOf(tab.page)}`
+    : tab.path.split("/").pop() ?? tab.path;
   const closing = app.closing;
   const settle = async (choice: "save" | "discard" | "cancel") => {
     if (!closing || closing.kind !== "code") return;
@@ -39,7 +41,7 @@ export function TabBar() {
                title={tab.kind === "code" ? tab.path : title(tab)}
                onClick={() => app.activate(tab.id)}
                onAuxClick={(e) => { if (e.button === 1) app.close(tab.id); }}>
-            <Icon name={tab.kind === "doc" ? "file" : "code"} size={14} />
+            <Icon name={tab.kind === "doc" ? "file" : tab.kind === "help" ? "help" : "code"} size={14} />
             <span className="tab-title">{title(tab)}{tab.kind === "code" && unsaved.has(tab.fileId) && <span className="unsaved" title="Unsaved changes"> ●</span>}</span>
             <button type="button" className="tab-close" title="Close"
                     onClick={(e) => { e.stopPropagation(); app.close(tab.id); }}>

@@ -7,7 +7,7 @@ import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { CodeTab, useApp } from "../store";
-import { At, CompletionItem, ExamplesAnswer } from "../types";
+import { At, CompletionItem, ExamplesAnswer, Finding } from "../types";
 import { Status } from "../ui";
 import { assistant } from "./assistant";
 import { drafts } from "./drafts";
@@ -137,7 +137,7 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
     setSaving(true);
     try {
       const saved = await saveFile(tab.fileId);
-      if (saved) actions.current.filesChanged();
+      if (saved) { actions.current.filesChanged(); markRef.current(); }
       else if (drafts.conflict(tab.fileId)) actions.current.notify("The file has changed on disk since it was opened. Compare the two before saving.", "error");
     } catch (error) {
       actions.current.notify(error instanceof Error ? error.message : String(error), "error");
@@ -147,6 +147,7 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
   };
   const saveRef = useRef(save);
   saveRef.current = save;
+  const markRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!data || !host.current) return;
@@ -167,6 +168,19 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
     editor.current = instance;
     marks.current = instance.createDecorationsCollection();
     const unregister = registerEditor(data.file.id, instance);
+    // Convention checks on the saved file as information markers (ADR-021), with the rule's examples in the hover
+    const mark = () => {
+      if (!assisted) return;
+      api.get<Finding[]>(`/codebases/${data.file.codebase_id}/checks?file=${data.file.id}`).then((findings) => {
+        if (instance.getModel() !== model) return;
+        monaco.editor.setModelMarkers(model, "searchables", findings.map((f) => ({
+          severity: monaco.MarkerSeverity.Info, startLineNumber: f.line, startColumn: 1, endLineNumber: f.line, endColumn: model.getLineMaxColumn(f.line),
+          message: f.message + (f.examples.length ? "\nFollows the rule: " + f.examples.map((e) => `${e.path.split("/").pop()}:${e.line}`).join(", ") : ""),
+        })));
+      }).catch(() => {});
+    };
+    mark();
+    markRef.current = mark;
     // The Examples view follows what's being written: asked for after a pause in typing or a cursor move
     let pause = 0;
     const ask = () => {

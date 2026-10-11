@@ -4,7 +4,7 @@ import { drafts } from "./code/drafts";
 import { api } from "./api";
 import { At, BBox, Block, Overview } from "./types";
 
-export type Activity = "search" | "contents" | "catalogue" | "glossary" | "compare" | "collections" | "library" | "code";
+export type Activity = "search" | "contents" | "catalogue" | "glossary" | "compare" | "collections" | "library" | "code" | "help";
 
 /** What a document tab highlights: the words of a search, or an identifier. */
 export interface Highlight { q?: string; identifier?: string; children?: boolean }
@@ -22,7 +22,9 @@ export interface DocTab {
 
 export interface CodeTab { id: string; kind: "code"; fileId: number; path: string; line: number; nonce: number }
 
-export type Tab = DocTab | CodeTab;
+export interface HelpTab { id: string; kind: "help"; page: string; nonce: number }
+
+export type Tab = DocTab | CodeTab | HelpTab;
 
 export interface DocLocation { docId: number; page: number; target?: BBox | null; blockId?: number | null; highlight?: Highlight }
 export interface CodeLocation { fileId: number; path: string; line: number }
@@ -40,6 +42,7 @@ interface AppContext {
   close: (id: string, force?: boolean) => void;
   openDoc: (location: DocLocation) => void;
   openCode: (location: CodeLocation) => void;
+  openHelp: (page: string) => void;
   updateDoc: (id: string, patch: Partial<DocTab>) => void;
   updateCode: (id: string, patch: Partial<CodeTab>) => void;
   filesVersion: number;         // Bumped when a file was saved, created, renamed or deleted: file views load again
@@ -169,6 +172,11 @@ export function AppProvider({ initial, children }: { initial: Overview; children
            line: location.line, nonce: nonce.current++ }, true);
   }, [show]);
 
+  const openHelp = useCallback((page: string) => {
+    setActivity("help");
+    show({ id: "help", kind: "help", page, nonce: nonce.current++ }, true);
+  }, [show]);
+
   const updateDoc = useCallback((id: string, patch: Partial<DocTab>) => {
     setTabs((all) => all.map((t) => (t.id === id && t.kind === "doc" ? { ...t, ...patch } : t)));
   }, []);
@@ -243,14 +251,14 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const value = useMemo<AppContext>(() => ({
     overview, refresh, activity, setActivity, tabs,
     active: tabs.find((t) => t.id === activeId) ?? null,
-    activate: setActiveId, close, openDoc, openCode, updateDoc, updateCode, filesVersion, filesChanged, closing, setClosing, inspectorView, setInspectorView,
+    activate: setActiveId, close, openDoc, openCode, openHelp, updateDoc, updateCode, filesVersion, filesChanged, closing, setClosing, inspectorView, setInspectorView,
     back: () => step(-1), forward: () => step(1),
     canGoBack: history.current.index > 0,
     canGoForward: history.current.index < history.current.places.length - 1,
     collectionId, setCollectionId, pinned, pinsVersion, togglePin, pinSymbol,
     pinsChanged: () => { setPinsVersion((n) => n + 1); refresh(); },
     symbolId, setSymbolId, at, setAt, cite, setCite, passageText, toasts, notify, run,
-  }), [at, cite, setCite, passageText, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, updateDoc, updateCode, filesVersion, filesChanged, closing, inspectorView, step, collectionId, pinned,
+  }), [at, cite, setCite, passageText, overview, refresh, activity, tabs, activeId, close, openDoc, openCode, openHelp, updateDoc, updateCode, filesVersion, filesChanged, closing, inspectorView, step, collectionId, pinned,
        pinsVersion, togglePin, pinSymbol, symbolId, toasts, notify, run]);
 
   return <Context.Provider value={value}>{children}</Context.Provider>;

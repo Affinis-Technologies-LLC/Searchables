@@ -308,3 +308,126 @@ def test_examples_api(signed_in):
 
     assert client.post("/api/code/feedback", json={"digest": answer["context"]["digest"], "ref_id": first["ref_id"], "action": "insert"}, headers=WRITE).status_code == 200
     assert client.post("/api/code/feedback", json={"digest": "x", "ref_id": 1, "action": "stole"}, headers=WRITE).status_code == 400
+
+
+def test_session_state_and_about_carry_the_version(signed_in):
+    from src import version
+    client = signed_in
+    session = client.get("/api/session").json()
+    assert session["version"] == version.VERSION
+    state = client.get("/api/state").json()
+    assert state["version"] == version.VERSION and state["commit"] == version.describe()["commit"]
+    about = client.get("/api/about").json()
+    assert about["version"] == version.VERSION and about["python"].startswith("3.") and about["platform"]
+    assert about["data_dir"] and about["model"]["name"] and isinstance(about["model"]["present"], bool)
+    assert {"documents", "codebases", "collections", "pins"} <= set(about["counts"])
+    assert any(p["name"].lower().startswith("starlette") for p in about["python_packages"]) and all("licence" in p for p in about["python_packages"])
+
+
+def test_patterns_api(signed_in):
+    client = signed_in
+    root = str(Path(__file__).parent / "codebase_examples")
+    codebase = next((c for c in client.get("/api/state").json()["codebases"] if c["root"] == root), None) \
+        or client.post("/api/codebases", json={"root": root, "name": "Shop"}, headers=WRITE).json()   # Another test may have added it
+    wait_for_jobs(client)
+    patterns = client.get(f"/api/codebases/{codebase['id']}/patterns").json()
+    assert {i["type_name"] for i in patterns["idioms"]} >= {"OrderRepository"} and patterns["layers"][0] == "com.shop.web"
+    assert patterns["pairs"][0]["support"] >= 3 and patterns["entry_points"][0]["chain"][0]["symbol"].endswith("#load")
+
+
+def test_impact_api(signed_in):
+    client = signed_in
+    root = str(Path(__file__).parent / "codebase_examples")
+    codebase = next((c for c in client.get("/api/state").json()["codebases"] if c["root"] == root), None) \
+        or client.post("/api/codebases", json={"root": root, "name": "Shop"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    save = next(s for s in client.get(f"/api/codebases/{codebase['id']}/symbols?q=save").json() if s["qualified"].endswith("OrderRepository#save") and s["params"] == 1)
+    impact = client.get(f"/api/code/symbols/{save['id']}/impact").json()
+    assert [r["route"] for r in impact["routes"]] == ["POST /api/orders"] and len(impact["nodes"]) == 3
+
+
+def test_unused_and_signature_api(signed_in):
+    client = signed_in
+    root = str(Path(__file__).parent / "codebase_examples")
+    codebase = next((c for c in client.get("/api/state").json()["codebases"] if c["root"] == root), None) \
+        or client.post("/api/codebases", json={"root": root, "name": "Shop"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    unused = client.get(f"/api/codebases/{codebase['id']}/unused").json()
+    assert any(u["symbol"]["qualified"].endswith("OrderService#open") for u in unused["methods"]) and unused["routes"] == []
+    found = client.get(f"/api/codebases/{codebase['id']}/signatures?kind=method&returns=Optional&param=long").json()
+    assert sorted(s["name"] for s in found) == ["find", "find"]
+
+
+def test_snapshots_api(signed_in, tmp_path):
+    import shutil
+    client = signed_in
+    shutil.copytree(Path(__file__).parent / "codebase_examples", tmp_path / "shop")
+    codebase = client.post("/api/codebases", json={"root": str(tmp_path / "shop"), "name": "Snap"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    snapshot = client.post(f"/api/codebases/{codebase['id']}/snapshots", json={"label": "before"}, headers=WRITE).json()
+    assert snapshot["label"] == "before" and snapshot["symbol_count"] > 40
+    service = tmp_path / "shop/backend/src/main/java/com/shop/service/OrderService.java"
+    service.write_text(service.read_text().replace("public Order load(long id)", "public Order load(String id)"))
+    client.post(f"/api/codebases/{codebase['id']}/scan", headers=WRITE)
+    wait_for_jobs(client)
+    diff = client.get(f"/api/codebases/{codebase['id']}/diff?against=snapshot:{snapshot['id']}").json()
+    assert [c["now"]["name"] for c in diff["changed"]] == ["load"] and diff["changed"][0]["callers"][0]["from_name"].endswith("#get")
+    assert client.get(f"/api/codebases/{codebase['id']}/diff?against=nothing").status_code == 400
+    assert client.delete(f"/api/code/snapshots/{snapshot['id']}", headers=WRITE).status_code == 200
+    assert client.get(f"/api/codebases/{codebase['id']}/snapshots").json() == []
+
+
+def test_checks_api(signed_in):
+    client = signed_in
+    root = str(Path(__file__).parent / "codebase_examples")
+    codebase = next((c for c in client.get("/api/state").json()["codebases"] if c["root"] == root), None) \
+        or client.post("/api/codebases", json={"root": root, "name": "Shop"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    findings = client.get(f"/api/codebases/{codebase['id']}/checks").json()
+    assert isinstance(findings, list) and all({"kind", "message", "examples", "confidence"} <= set(f) for f in findings)
+
+
+def test_tables_as_code_api(signed_in, monkeypatch):
+    from tests.conftest import MESSAGE_FOOTERS, make_pdf, message_standard
+    client = signed_in
+    pdf = make_pdf(message_standard(), header="XYZ-STD-9999", footers=MESSAGE_FOOTERS)
+    client.post("/api/documents?filename=XYZ-STD-9999A.pdf", content=pdf, headers=WRITE)
+    wait_for_jobs(client)
+    doc = next(d for d in client.get("/api/state").json()["documents"] if d["title"].startswith("XYZ-STD-9999A"))
+    page = client.get(f"/api/documents/{doc['id']}/pages/2").json()
+    table = next(b for b in page["blocks"] if b["kind"] == "table" and b["text"].startswith("TABLE 5.1-1"))
+    code = client.get(f"/api/blocks/{table['id']}/as-code?language=typescript").json()
+    assert code["constants"] == ["REFERENCE_NUMBER", "STRENGTH"] and "as const" in code["text"]
+    assert client.get(f"/api/blocks/{table['id']}/compare-enum?symbol=0").status_code == 404
+
+
+def test_trace_api(signed_in, tmp_path):
+    from tests.conftest import MESSAGE_FOOTERS, make_pdf, message_standard
+    client = signed_in
+    if not any(d["title"].startswith("XYZ-STD-9999A") for d in client.get("/api/state").json()["documents"]):
+        client.post("/api/documents?filename=XYZ-STD-9999A.pdf", content=make_pdf(message_standard(), header="XYZ-STD-9999", footers=MESSAGE_FOOTERS), headers=WRITE)
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code/Message.java").write_text('public class Message { static final String F = "GRP/ITM 281/001"; }\n')
+    codebase = client.post("/api/codebases", json={"root": str(tmp_path / "code"), "name": "Trace"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    mentions = client.get("/api/catalogue/code?id=GRP/ITM%20281/001").json()
+    assert [(m["line"], m["certainty"]) for m in mentions if m["codebase_id"] == codebase["id"]] == [(1, "exact")]
+    file = client.get(f"/api/codebases/{codebase['id']}/files").json()[0]
+    assert [(i["identifier"], i["line"]) for i in client.get(f"/api/code/files/{file['id']}/identifiers").json()] == [("GRP/ITM 281/001", 1)]
+
+
+def test_git_and_rename_api(signed_in, tmp_path):
+    import shutil
+    client = signed_in
+    shutil.copytree(Path(__file__).parent / "codebase_examples", tmp_path / "shop")
+    codebase = client.post("/api/codebases", json={"root": str(tmp_path / "shop"), "name": "GitRename"}, headers=WRITE).json()
+    wait_for_jobs(client)
+    info = client.get(f"/api/codebases/{codebase['id']}/git").json()
+    assert info["repository"] is False and info["reason"]
+    find = next(s for s in client.get(f"/api/codebases/{codebase['id']}/symbols?q=find").json() if s["qualified"].endswith("OrderRepository#find"))
+    preview = client.post(f"/api/code/symbols/{find['id']}/rename/preview", json={"name": "lookup"}, headers=WRITE).json()
+    assert len(preview["edits"]) == 4 and all(e["selected"] for e in preview["edits"])
+    assert client.post(f"/api/code/symbols/{find['id']}/rename/preview", json={"name": "1bad"}, headers=WRITE).status_code == 400
+    done = client.post(f"/api/code/symbols/{find['id']}/rename", json={"name": "lookup", "edits": [e["key"] for e in preview["edits"]]}, headers=WRITE).json()
+    assert done["edits_applied"] == 4 and done["skipped"] == []
+    assert "repository.lookup(" in (tmp_path / "shop/backend/src/main/java/com/shop/service/OrderService.java").read_text()

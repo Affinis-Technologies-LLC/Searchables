@@ -1,0 +1,27 @@
+[
+  {
+    "name": "monaco-editor",
+    "version": "0.52.2",
+    "licence": "MIT"
+  },
+  {
+    "name": "pdfjs-dist",
+    "version": "4.10.38",
+    "licence": "Apache-2.0"
+  },
+  {
+    "name": "react",
+    "version": "18.3.1",
+    "licence": "MIT"
+  },
+  {
+    "name": "react-dom",
+    "version": "18.3.1",
+    "licence": "MIT"
+  },
+  {
+    "name": "react-resizable-panels",
+    "version": "2.1.9",
+    "licence": "MIT"
+  }
+]

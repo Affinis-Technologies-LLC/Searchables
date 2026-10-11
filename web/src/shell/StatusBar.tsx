@@ -2,6 +2,7 @@ import { FormEvent, useState } from "react";
 import { api } from "../api";
 import { useApp } from "../store";
 import { Icon } from "../ui";
+import { About } from "./About";
 
 const JOB_LABEL = { add: "Adding", reindex: "Re-indexing", embed: "Adding meaning search to", code: "Scanning" };
 
@@ -9,6 +10,7 @@ export function StatusBar({ onSignedOut }: { onSignedOut: () => void }) {
   const app = useApp();
   const { overview } = app;
   const [account, setAccount] = useState(false);
+  const [about, setAbout] = useState(false);
   const running = overview.jobs.active.find((j) => j.status === "running");
   const waiting = overview.jobs.active.length - (running ? 1 : 0);
   const collection = overview.collections.find((c) => c.id === app.collectionId);
@@ -46,13 +48,14 @@ export function StatusBar({ onSignedOut }: { onSignedOut: () => void }) {
         <button type="button" className="status-button" onClick={() => setAccount((open) => !open)}>
           <Icon name="user" size={14} /> Account
         </button>
-        {account && <Account onClose={() => setAccount(false)} onSignOut={signOut} />}
+        {account && <Account onClose={() => setAccount(false)} onSignOut={signOut} onAbout={() => { setAccount(false); setAbout(true); }} />}
       </div>
+      {about && <About onClose={() => setAbout(false)} />}
     </footer>
   );
 }
 
-function Account({ onClose, onSignOut }: { onClose: () => void; onSignOut: () => void }) {
+function Account({ onClose, onSignOut, onAbout }: { onClose: () => void; onSignOut: () => void; onAbout: () => void }) {
   const app = useApp();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -87,7 +90,11 @@ function Account({ onClose, onSignOut }: { onClose: () => void; onSignOut: () =>
         <button type="submit" disabled={!current || !next}>Change password</button>
       </form>
       <hr />
-      <button type="button" onClick={onSignOut}>Sign out</button>
+      <div className="row">
+        <button type="button" onClick={onAbout}>About</button>
+        <button type="button" onClick={onSignOut}>Sign out</button>
+        <span className="muted grow" style={{ textAlign: "right" }}>v{__APP_VERSION__}</span>
+      </div>
     </div>
   );
 }

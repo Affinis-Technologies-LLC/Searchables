@@ -28,7 +28,8 @@ def check(quiet: bool = False) -> int:
               "to build it from source: cd web && npm ci && npm run build")
         return 1
     if not quiet:
-        print("Searchables is ready to start.")
+        from src import version
+        print(f"Searchables {version.VERSION} is ready to start.")
     return 0
 
 
@@ -55,8 +56,11 @@ def main() -> int:
 
     import uvicorn
 
+    from src import version
     from src.server.app import app
-    print(f"Searchables is running: http://{'127.0.0.1' if args.address == '0.0.0.0' else args.address}:{args.port}", flush=True)
+    described = version.describe()
+    print(f"Searchables {described['version']}{' (' + described['commit'] + ')' if described['commit'] else ''} is running: "
+          f"http://{'127.0.0.1' if args.address == '0.0.0.0' else args.address}:{args.port}", flush=True)
     uvicorn.run(app, host=args.address, port=args.port, log_level="warning")
     return 0
 

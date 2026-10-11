@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api, query } from "../api";
 import { useLoad } from "../hooks";
 import { useApp } from "../store";
-import { Block, CatalogueChanges, CatalogueDetail, CatalogueEntry, Located } from "../types";
-import { Badge, CopyButton, Empty, Status, Table } from "../ui";
+import { Block, CatalogueChanges, CatalogueDetail, CatalogueEntry, CodeMention, Located } from "../types";
+import { Badge, CopyButton, Empty, shortPath, Status, Table } from "../ui";
 
 const SHOWN = 1200;   // Rows drawn at once; a filter narrows a longer list
 
@@ -41,6 +41,13 @@ export function CataloguePanel() {
     const at = t.indexOf(value);
     return restart ? [value] : at >= 0 ? t.slice(0, at + 1) : [...t, value].slice(-10);
   });
+  // The code inspector opens an identifier's entry from a file's mentions (ADR-014)
+  useEffect(() => {
+    const onIdentifier = (event: Event) => follow((event as CustomEvent<string>).detail, true);
+    window.addEventListener("searchables:identifier", onIdentifier);
+    return () => window.removeEventListener("searchables:identifier", onIdentifier);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const toggle = (key: string) => setOpen((current) => {
     const next = new Set(current);
     if (!next.delete(key)) next.add(key);
@@ -128,6 +135,7 @@ function Entry({ value, scope, onFollow }: { value: string; scope: string; onFol
       <div className="row wrap">{values.map((v) => <button key={v} type="button" className="link" onClick={() => onFollow(v)}>{v}</button>)}</div>
     </section>
   );
+  const inCode = useLoad<CodeMention[]>(() => (app.overview.codebases.length ? api.get(`/catalogue/code` + query({ id: value })) : null), [value, app.overview.codebases.length, app.filesVersion]);
   if (!data) return <Status loading={loading} error={error} />;
   const nothing = !data.defined.length && !data.tables.length && !data.rows.length && !data.rules.length && !data.mentions;
   return (
@@ -135,6 +143,16 @@ function Entry({ value, scope, onFollow }: { value: string; scope: string; onFol
       <h3 className="card-title">{data.value || value}</h3>
       {nothing && <Empty>Nothing in scope mentions it. Its pattern may be switched off (Library → Manage → Identifiers).</Empty>}
       {data.parent && chips("Part of", [data.parent], "The identifier this one extends")}
+      {inCode.data && inCode.data.length > 0 && (
+        <section>
+          <div className="group-title" title="Where this identifier's text appears in the code, or a symbol is named after it. A mention, not a claim that the code implements it.">In the code · {inCode.data.length}</div>
+          {inCode.data.map((m, i) => (
+            <button key={i} type="button" className="code-row usage" title={m.path} onClick={() => app.openCode({ fileId: m.file_id, path: m.path, line: m.line })}>
+              <span className="where">{shortPath(m.path, 2)}:{m.line}</span><code>{m.text}</code>{m.certainty === "name" && <span className="muted"> · by name</span>}
+            </button>
+          ))}
+        </section>
+      )}
       {chips("Its parts", data.children, "Identifiers that extend this one: a message's words, a data field's uses")}
       {data.defined.length > 0 && (
         <section>

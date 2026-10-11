@@ -34,7 +34,18 @@ from src.code.parser import JAVA
 from src.code.complete import complete_at
 from src.code.context import context_at
 from src.code.examples import examples_for
+from src.code import git
+from src.code.checks import checks_for
+from src.code.rename import apply_rename, preview_rename
+from src.code.impact import impact_of
+from src.code.patterns import patterns_for
+from src.code.signatures import search_signatures
+from src.code.snapshots import diff_against, take_snapshot
+from src.code.unused import unused_in
 from src.code.store import Conflict, CodeStore
+from src import version
+from src.research.tables_as_code import as_code, compare_with_enum
+from src.research.trace import code_mentions, identifiers_in_file
 from src.extractor.identifiers import identifier_key
 from src.extractor.pdf import ocr_available
 from src.models import Document, TextBlock
@@ -224,7 +235,8 @@ def _signed_in(data: dict) -> Response:
 def session(c: Call) -> dict:
     return {"authenticated": services.sessions.active(c.request.cookies.get(COOKIE)),
             "setup": auth.load() is None, "min_password": config.MIN_PASSWORD_LENGTH,
-            "idle_minutes": config.SESSION_IDLE_MINUTES, "auth_file": str(config.AUTH_FILE)}
+            "idle_minutes": config.SESSION_IDLE_MINUTES, "auth_file": str(config.AUTH_FILE),
+            "version": version.VERSION}
 
 
 @api("POST", "/session/setup", public=True)
@@ -297,6 +309,52 @@ def state(c: Call) -> dict:
         "content_kinds": CONTENT_KINDS,
         "provisions": PROVISION_FILTERS,
         "max_results": config.DEFAULT_MAX_RESULTS,
+        "version": version.VERSION,
+        "commit": version.describe()["commit"],
+    }
+
+
+def _python_packages() -> list:
+    """The Python packages the app declares, with their installed versions and licences (from their metadata)."""
+    from importlib import metadata
+    names = []
+    for line in (config.PROJECT_ROOT / "requirements.txt").read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if line and not line.startswith("-"):
+            names.append(re.split(r"[<>=!~\[;\s]", line)[0])
+    packages = []
+    for name in names:
+        try:
+            info = metadata.metadata(name)
+        except metadata.PackageNotFoundError:
+            packages.append({"name": name, "version": "", "licence": "not installed"})
+            continue
+        licence = info.get("License-Expression") or ""
+        if not licence:
+            classifiers = [c for c in info.get_all("Classifier") or [] if c.startswith("License ::")]
+            licence = classifiers[0].split("::")[-1].strip() if classifiers else (info.get("License") or "").splitlines()[0] if info.get("License") else ""
+        packages.append({"name": name, "version": info.get("Version", ""), "licence": licence[:60]})
+    return packages
+
+
+@api("GET", "/about")
+def about(c: Call) -> dict:
+    """What a bug report needs: version, build, where things are, what's present."""
+    import platform
+    s = services
+    described = version.describe()
+    return {
+        **described,
+        "data_dir": str(config.DATA_DIR),
+        "model": {"name": config.EMBEDDING_MODEL, "revision": config.EMBEDDING_REVISION[:12], "dir": str(config.MODEL_DIR),
+                  "present": bool(semantic.model_files_present()), "device": config.EMBEDDING_DEVICE},
+        "ocr": s.ocr,
+        "python": platform.python_version(),
+        "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "counts": {"documents": len(s.library.list_documents()), "codebases": len(s.code.list_codebases()),
+                   "collections": len(s.collections.list_collections()),
+                   "pins": sum(col.pin_count for col in s.collections.list_collections())},
+        "python_packages": _python_packages(),
     }
 
 
@@ -558,6 +616,31 @@ def block_table(c: Call) -> dict:
     if table is None:
         raise NotFound("That passage isn't a table.")
     return table
+
+
+@api("GET", "/catalogue/code")
+def catalogue_code(c: Call) -> list:
+    """Where an identifier's text appears in the codebases (ADR-014): exact, or a symbol named after it."""
+    return plain(code_mentions(services.library, services.code, c.query.get("id", ""), c.ints("codebases") or None))
+
+
+@api("GET", "/code/files/{id:int}/identifiers")
+def code_file_identifiers(c: Call) -> list:
+    """The Catalogue's identifiers mentioned in a file (ADR-014)."""
+    return plain(identifiers_in_file(services.library, services.code, c.path["id"]))
+
+
+@api("GET", "/blocks/{id:int}/as-code")
+def block_as_code(c: Call) -> dict:
+    """A table as a Java enum or a TypeScript constant object (ADR-022)."""
+    language = "typescript" if c.query.get("language") == "typescript" else "java"
+    return plain(as_code(services.library, services.block(c.path["id"]), language, c.query.get("name", "")[:60]))
+
+
+@api("GET", "/blocks/{id:int}/compare-enum")
+def block_compare_enum(c: Call) -> dict:
+    """The table's constants against an enum of a codebase (ADR-022)."""
+    return plain(compare_with_enum(services.library, services.code, services.block(c.path["id"]), _symbol(int(c.query.get("symbol", 0)))))
 
 
 # ---- Collections --------------------------------------------------------------------------------
@@ -884,6 +967,12 @@ def code_symbol(c: Call) -> dict:
     return {"symbol": symbol, "members": services.code.members(symbol.id), "hierarchy": services.code.hierarchy(symbol)}
 
 
+@api("GET", "/code/symbols/{id:int}/impact")
+def code_impact(c: Call) -> dict:
+    """Everything that reaches the symbol through calls (ADR-018), by layer, with routes and tests."""
+    return plain(impact_of(services.code, _symbol(c.path["id"]), by_name=c.flag("by_name")))
+
+
 @api("GET", "/code/symbols/{id:int}/usages")
 def code_usages(c: Call) -> list:
     return services.code.usages(_symbol(c.path["id"]))
@@ -923,6 +1012,107 @@ def code_external_usages(c: Call) -> list:
 @api("GET", "/codebases/{id:int}/links")
 def code_package_links(c: Call) -> list:
     return services.code.package_links(_codebase(c.path["id"]).id, c.query.get("source", ""), c.query.get("target", ""))
+
+
+@api("GET", "/codebases/{id:int}/patterns")
+def code_patterns(c: Call) -> dict:
+    """What's usual in the codebase (ADR-013), computed from the index and cached until it changes."""
+    return plain(patterns_for(services.code, _codebase(c.path["id"]).id))
+
+
+# ---- Git (ADR-015): the one program the app starts; status, diff, log and commit only --------------
+
+@api("GET", "/codebases/{id:int}/git")
+def code_git(c: Call) -> dict:
+    return plain(git.info(Path(_codebase(c.path["id"]).root)))
+
+
+@api("GET", "/codebases/{id:int}/git/diff")
+def code_git_diff(c: Call) -> dict:
+    return {"diff": git.diff(Path(_codebase(c.path["id"]).root), c.query.get("path", ""))}
+
+
+@api("GET", "/codebases/{id:int}/git/log")
+def code_git_log(c: Call) -> list:
+    return plain(git.log(Path(_codebase(c.path["id"]).root)))
+
+
+@api("POST", "/codebases/{id:int}/git/commit")
+def code_git_commit(c: Call) -> dict:
+    codebase = _codebase(c.path["id"])
+    _editable(codebase.id)
+    paths = c.data.get("paths") or []
+    if not isinstance(paths, list):
+        raise ValueError("Choose the files to commit.")
+    return plain(git.commit(Path(codebase.root), [str(p) for p in paths], str(c.data.get("message", ""))))
+
+
+# ---- Rename symbol (ADR-015) -----------------------------------------------------------------------
+
+@api("POST", "/code/symbols/{id:int}/rename/preview")
+def code_rename_preview(c: Call) -> dict:
+    return plain(preview_rename(services.code, _symbol(c.path["id"]), str(c.data.get("name", ""))))
+
+
+@api("POST", "/code/symbols/{id:int}/rename")
+def code_rename(c: Call) -> dict:
+    symbol = _symbol(c.path["id"])
+    _editable(symbol.codebase_id)
+    keys = c.data.get("edits") or []
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("Choose the places to rename.")
+    return plain(apply_rename(services.code, symbol, str(c.data.get("name", "")), [str(k) for k in keys]))
+
+
+@api("GET", "/codebases/{id:int}/unused")
+def code_unused(c: Call) -> dict:
+    """Dead and unreachable code (ADR-019), with certainty."""
+    return plain(unused_in(services.code, _codebase(c.path["id"]).id))
+
+
+@api("GET", "/codebases/{id:int}/signatures")
+def code_signatures(c: Call) -> list:
+    """Symbols by kind, name, declared or return type, parameter count and types, and owner (ADR-019)."""
+    q = c.query
+    params = int(q["params"]) if q.get("params", "").lstrip("-").isdigit() else None
+    return search_signatures(services.code, _codebase(c.path["id"]).id, kind=q.get("kind", ""), name=q.get("name", ""),
+                             returns=q.get("returns", ""), param=q.get("param", ""), params=params, owner=q.get("owner", ""))
+
+
+@api("GET", "/codebases/{id:int}/snapshots")
+def code_snapshots(c: Call) -> list:
+    return services.code.snapshots(_codebase(c.path["id"]).id)
+
+
+@api("POST", "/codebases/{id:int}/snapshots")
+def code_take_snapshot(c: Call) -> dict:
+    """Keeps the index as it is now, to diff against later (ADR-020)."""
+    return plain(take_snapshot(services.code, _codebase(c.path["id"]).id, str(c.data.get("label", ""))[:80]))
+
+
+@api("DELETE", "/code/snapshots/{id:int}")
+def code_delete_snapshot(c: Call) -> dict:
+    services.code.delete_snapshot(c.path["id"])
+    return {"removed": True}
+
+
+@api("GET", "/codebases/{id:int}/diff")
+def code_diff(c: Call) -> dict:
+    """The index now against a snapshot (against=snapshot:N) or another codebase (against=codebase:M)."""
+    kind, _, number = c.query.get("against", "").partition(":")
+    if kind not in ("snapshot", "codebase") or not number.isdigit():
+        raise ValueError("Say what to compare against: snapshot:N or codebase:M.")
+    codebase = _codebase(c.path["id"])
+    if kind == "codebase":
+        return plain(diff_against(services.code, codebase.id, codebase_id_before=_codebase(int(number)).id))
+    return plain(diff_against(services.code, codebase.id, snapshot_id=int(number)))
+
+
+@api("GET", "/codebases/{id:int}/checks")
+def code_checks(c: Call) -> list:
+    """Convention checks from the codebase's own patterns (ADR-021), for the codebase or one file."""
+    file_id = int(c.query["file"]) if c.query.get("file", "").isdigit() else None
+    return plain(checks_for(services.code, _codebase(c.path["id"]).id, file_id))
 
 
 @api("GET", "/codebases/{id:int}/endpoints")

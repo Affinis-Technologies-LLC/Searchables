@@ -252,6 +252,24 @@ details.related > summary::-webkit-details-marker { display: none; }
 /* ---- Code ----------------------------------------------------------------------------------- */
 .code-host { flex: 1 1 auto; min-height: 0; }
 .unsaved { color: #d97706; font-weight: 700; }
+.side-pane { position: relative; }
+.help-button { position: absolute; top: 6px; right: 8px; z-index: 2; width: 22px; height: 22px; padding: 0; border-radius: 50%; font-weight: 700; opacity: 0.6; }
+.help-button:hover { opacity: 1; }
+.help-page { padding: 12px 24px 40px; max-width: 760px; overflow: auto; font-size: 14px; line-height: 1.55; }
+.help-page h1 { font-size: 22px; margin: 8px 0 12px; }
+.help-page h2 { font-size: 16px; margin: 20px 0 6px; }
+.help-page h3 { font-size: 14px; margin: 14px 0 4px; }
+.help-page li { margin: 3px 0; }
+.help-page kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; }
+.dialog-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.dialog { background: var(--bg, #fff); color: inherit; border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; width: min(640px, 92vw); max-height: 86vh; overflow: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25); }
+.dialog header { margin-bottom: 8px; }
+.about-lines { white-space: pre-wrap; }
+.snippet.diff .add { background: rgba(22, 101, 52, 0.14); }
+.snippet.diff .del { background: rgba(185, 28, 28, 0.14); }
+textarea { width: 100%; font: inherit; resize: vertical; }
+.about-table { font-size: 12px; border-collapse: collapse; margin-top: 6px; }
+.about-table td { padding: 2px 10px 2px 0; border-bottom: 1px solid var(--border); }
 .context-line { font-size: 12px; padding: 4px 0 6px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
 .context-line code { font-family: var(--mono); }
 .card.example .score { font-family: var(--mono); font-size: 11px; margin-left: auto; }
@@ -259,6 +277,9 @@ details.related > summary::-webkit-details-marker { display: none; }
 .snippet .ln { display: inline-block; width: 3.2em; color: var(--muted); user-select: none; }
 .snippet .hit { background: rgba(250, 204, 21, 0.22); }
 button.quiet { opacity: 0.7; }
+.pattern-row { display: flex; width: 100%; gap: 8px; text-align: left; padding: 5px 8px; background: none; border: 0; border-bottom: 1px solid var(--border); font: inherit; color: inherit; cursor: pointer; }
+.pattern-row:hover { background: rgba(127, 127, 127, 0.08); }
+.pattern .examples { padding: 2px 0 6px 12px; }
 .ask { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 12px; background: rgba(202, 138, 4, 0.13); border-left: 1px solid var(--border); white-space: nowrap; }
 .inline-form { display: flex; gap: 6px; align-items: center; padding: 4px 8px; }
 .inline-form input { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 12px; }

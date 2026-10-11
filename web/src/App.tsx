@@ -4,6 +4,8 @@ import { api, onSignedOut } from "./api";
 import { CodeInspector } from "./code/CodeInspector";
 import { CodePanel } from "./code/CodePanel";
 import { CodeView } from "./code/CodeView";
+import { HelpPanel } from "./help/HelpPanel";
+import { HelpView } from "./help/HelpView";
 import { CataloguePanel } from "./documents/CataloguePanel";
 import { CollectionsPanel } from "./documents/CollectionsPanel";
 import { ComparePanel } from "./documents/ComparePanel";
@@ -69,10 +71,16 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
   const panels = {
     search: <SearchPanel />, contents: <ContentsPanel />, catalogue: <CataloguePanel />, glossary: <GlossaryPanel />,
     compare: <ComparePanel />,
-    collections: <CollectionsPanel />, library: <LibraryPanel />, code: <CodePanel />,
+    collections: <CollectionsPanel />, library: <LibraryPanel />, code: <CodePanel />, help: <HelpPanel />,
   };
   const side = Object.entries(panels).map(([name, panel]) => (
-    <div key={name} className="side-pane" hidden={name !== activity}>{panel}</div>
+    <div key={name} className="side-pane" hidden={name !== activity}>
+      {name !== "help" && (
+        <button type="button" className="help-button" title={`Help for this view (F1)`} aria-label="Help for this view"
+                onClick={() => app.openHelp(name)}>?</button>
+      )}
+      {panel}
+    </div>
   ));
 
   return (
@@ -96,7 +104,8 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
               {tabs.map((tab) => (
                 <div key={tab.id} className="editor-pane" hidden={tab.id !== active?.id}>
                   {tab.kind === "doc" ? <PdfView tab={tab} visible={tab.id === active?.id} />
-                                      : <CodeView tab={tab} visible={tab.id === active?.id} />}
+                   : tab.kind === "code" ? <CodeView tab={tab} visible={tab.id === active?.id} />
+                   : <HelpView tab={tab} />}
                 </div>
               ))}
             </div>
@@ -105,6 +114,7 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
           <Panel defaultSize={26} minSize={14} className="inspector">
             {active?.kind === "doc" && <DocInspector tab={active} />}
             {active?.kind === "code" && <CodeInspector tab={active} />}
+            {active?.kind === "help" && <Empty>Help pages are on the left; the <b>?</b> at the top of a view opens its page.</Empty>}
             {!active && <Empty>What's related to the passage or symbol you're looking at appears here.</Empty>}
           </Panel>
         </PanelGroup>

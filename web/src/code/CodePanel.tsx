@@ -8,8 +8,13 @@ import { UsageRows } from "./common";
 import { drafts } from "./drafts";
 import { createFile, deleteFile, renameFile } from "./editing";
 import { forgetFiles } from "./files";
+import { PatternsView } from "./PatternsView";
+import { UnusedView } from "./UnusedView";
+import { ChangesView } from "./ChangesView";
+import { ChecksView } from "./ChecksView";
+import { GitView } from "./GitView";
 
-const VIEWS = ["Search", "Files", "Dependencies", "APIs"] as const;
+const VIEWS = ["Search", "Files", "Dependencies", "APIs", "Patterns", "Checks", "Unused", "Changes", "Git"] as const;
 const KINDS: Record<string, string[]> = {
   Types: ["class", "interface", "enum", "record", "annotation", "type"],
   "Methods & functions": ["method", "constructor", "function"],
@@ -76,6 +81,11 @@ export function CodePanel() {
           {view === "Files" && <FileTree codebase={codebase} />}
           {view === "Dependencies" && <DependenciesView codebase={codebase} />}
           {view === "APIs" && <ApisView codebase={codebase} />}
+          {view === "Patterns" && <PatternsView codebase={codebase} />}
+          {view === "Unused" && <UnusedView codebase={codebase} />}
+          {view === "Changes" && <ChangesView codebase={codebase} />}
+          {view === "Checks" && <ChecksView codebase={codebase} />}
+          {view === "Git" && <GitView codebase={codebase} />}
         </>
       )}
     </div>
@@ -112,10 +122,15 @@ function AddCodebase({ onAdded }: { onAdded: (id: number) => void }) {
 
 function CodeSearch({ codebase }: { codebase: Codebase }) {
   const app = useApp();
-  const [mode, setMode] = useState<"Symbols" | "Text">("Symbols");
+  const [mode, setMode] = useState<"Symbols" | "Text" | "Signature">("Symbols");
   const [text, setText] = useState("");
   const [kinds, setKinds] = useState<string[]>([]);
   const wanted = useDebounced(text.trim(), 250);
+  const [sig, setSig] = useState({ kind: "", returns: "", param: "", params: "", owner: "" });
+  const signatures = useLoad<CodeSymbol[]>(
+    () => (mode === "Signature" && (wanted || sig.returns || sig.param || sig.owner || sig.params)
+      ? api.get(`/codebases/${codebase.id}/signatures` + query({ name: wanted, ...sig })) : null),
+    [codebase.id, codebase.indexed_at, app.filesVersion, mode, wanted, sig]);
   const symbols = useLoad<CodeSymbol[]>(
     () => (mode === "Symbols" && wanted ? api.get(`/codebases/${codebase.id}/symbols` + query({ q: wanted, kinds: kinds.flatMap((k) => KINDS[k]) })) : null),
     [codebase.id, codebase.indexed_at, mode, wanted, kinds]);
@@ -148,13 +163,25 @@ function CodeSearch({ codebase }: { codebase: Codebase }) {
   return (
     <>
       <div className="panel-head">
-        <Segments options={["Symbols", "Text"] as const} value={mode} onChange={setMode} />
+        <Segments options={["Symbols", "Text", "Signature"] as const} value={mode} onChange={setMode} />
         <div className="row">
           <input type="search" className="grow" value={text} onChange={(e) => setText(e.target.value)} aria-label="Search the code"
-                 placeholder={mode === "Symbols" ? "A class, method or function name" : "Any text in the source: a string, a URL, part of a name"} />
+                 placeholder={mode === "Symbols" ? "A class, method or function name" : mode === "Text" ? "Any text in the source: a string, a URL, part of a name" : "Part of the name (optional)"} />
           {mode === "Text" && <button type="button" onClick={() => setReplacing(!replacing)} title="Replace in the whole codebase" aria-pressed={replacing}>Replace</button>}
         </div>
         {mode === "Symbols" && <Chips options={Object.keys(KINDS)} value={kinds} onChange={setKinds} />}
+        {mode === "Signature" && (
+          <div className="row wrap">
+            <select value={sig.kind} onChange={(e) => setSig({ ...sig, kind: e.target.value })} aria-label="Kind">
+              <option value="">any kind</option><option value="method">methods</option><option value="function">functions</option>
+              <option value="field">fields</option><option value="constructor">constructors</option>
+            </select>
+            <input type="text" value={sig.returns} onChange={(e) => setSig({ ...sig, returns: e.target.value })} aria-label="Returns or is of type" placeholder="returns / of type" style={{ width: 110 }} />
+            <input type="text" value={sig.param} onChange={(e) => setSig({ ...sig, param: e.target.value })} aria-label="Takes a parameter of type" placeholder="takes a" style={{ width: 90 }} />
+            <input type="text" value={sig.params} onChange={(e) => setSig({ ...sig, params: e.target.value.replace(/\D/g, "") })} aria-label="Parameter count" placeholder="# params" style={{ width: 70 }} />
+            <input type="text" value={sig.owner} onChange={(e) => setSig({ ...sig, owner: e.target.value })} aria-label="Owner type" placeholder="on type" style={{ width: 100 }} />
+          </div>
+        )}
         {mode === "Text" && replacing && (
           <div className="row">
             <input type="text" className="grow" value={replacement} onChange={(e) => setReplacement(e.target.value)} aria-label="Replace with" placeholder="Replace with (exact text, matching case)" />
@@ -163,7 +190,21 @@ function CodeSearch({ codebase }: { codebase: Codebase }) {
         )}
       </div>
       <div className="panel-body">
-        <Status loading={symbols.loading || lines.loading} error={symbols.error || lines.error} />
+        <Status loading={symbols.loading || lines.loading || signatures.loading} error={symbols.error || lines.error || signatures.error} />
+        {mode === "Signature" && !signatures.data && <Empty>Symbols by what they take and return: methods taking a <code>User</code> and returning <code>Optional</code>, fields of type <code>Audit</code>, functions returning <code>Promise</code>.</Empty>}
+        {mode === "Signature" && signatures.data && (
+          <>
+            <div className="summary"><span>{signatures.data.length} symbol{signatures.data.length === 1 ? "" : "s"}</span></div>
+            {signatures.data.map((symbol) => (
+              <article key={symbol.id} className={`card ${app.symbolId === symbol.id ? "selected" : ""}`}
+                       onClick={() => { app.openCode({ fileId: symbol.file_id, path: symbol.path, line: symbol.line }); app.setSymbolId(symbol.id); app.setAt(null); if (app.inspectorView === "Examples") app.setInspectorView("Usages"); }}>
+                <header><Badge kind="object">{symbol.kind}</Badge><span className="card-title">{symbol.qualified.split(".").pop()}</span>{symbol.type && <span className="muted">: {symbol.type}</span>}</header>
+                <div className="card-path">{symbol.path}:{symbol.line}</div>
+                <code className="signature">{symbol.signature}</code>
+              </article>
+            ))}
+          </>
+        )}
         {mode === "Text" && replacing && preview && (
           <div className="notice" role="status">
             <span className="grow">{preview.changes.length ? `${total} occurrence${total === 1 ? "" : "s"} in ${preview.changes.length} file${preview.changes.length === 1 ? "" : "s"}:` : "Nothing to replace."}</span>
@@ -176,7 +217,7 @@ function CodeSearch({ codebase }: { codebase: Codebase }) {
             ))}
           </div>
         )}
-        {!wanted && <Empty>Results open in the editor. Choosing a symbol shows its usages, calls and hierarchy on the right.</Empty>}
+        {!wanted && mode !== "Signature" && <Empty>Results open in the editor. Choosing a symbol shows its usages, calls and hierarchy on the right.</Empty>}
         {mode === "Symbols" && symbols.data && (
           <>
             <div className="summary"><span>{symbols.data.length} symbol{symbols.data.length === 1 ? "" : "s"}</span></div>
