@@ -51,7 +51,8 @@ export function CallTree({ nodes, level = 0 }: { nodes: CallNode[]; level?: numb
 export function SymbolHead({ symbol }: { symbol: CodeSymbol }) {
   return (
     <>
-      <header><Badge kind="object">{symbol.kind}</Badge><span className="card-title">{symbol.qualified}</span></header>
+      <header><Badge kind="object">{symbol.kind}</Badge><span className="card-title">{symbol.qualified}</span>
+        {symbol.type && <span className="muted" title="Its declared or return type">: {symbol.type}</span>}</header>
       <div className="card-path">{symbol.path}:{symbol.line}</div>
       <code className="signature">{symbol.signature}</code>
     </>

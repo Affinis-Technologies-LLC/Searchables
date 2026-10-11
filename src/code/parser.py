@@ -52,6 +52,8 @@ class ParsedSymbol:
     params: int = -1            # Parameter count for methods and functions
     exported: bool = False      # Java: public; JS/TS: exported from its module
     default: bool = False       # JS/TS: the module's default export
+    type: str = ""              # Declared type of a field, parameter or variable; return type of a method or
+                                # function; the class for a constructor. As written: "List<User>", "Observable<User[]>"
 
 
 @dataclass
@@ -64,6 +66,9 @@ class ParsedRef:
     receiver: str = ""          # Java calls: the declared type of what it's called on, "this" or "super".
                                 # JS/TS: the name it's reached through ("axios" in axios.get(), "this")
     args: int = -1
+    chain: str = ""             # What it's called on, as a path from a known base, for the linker to follow:
+                                # "this.service.find()", "T:List<User>.stream()", "N:util.log()", "new User()",
+                                # "await N:fetch()". Steps are names, calls "name()" or "[]"; "" when it can't be told
 
 
 @dataclass
@@ -85,6 +90,16 @@ class ParsedEndpoint:
 
 
 @dataclass
+class ParsedComponent:
+    """An Angular component or directive: its selector, and the template it renders."""
+    symbol: int                 # Index of the class in ParsedFile.symbols
+    selector: str
+    template_url: str = ""      # Relative to the file, as written in templateUrl
+    template: str = ""          # An inline template
+    template_line: int = 0      # Line the inline template starts on
+
+
+@dataclass
 class ParsedFile:
     language: str
     package: str = ""           # Java package ("" for JS/TS: the index uses the file's folder)
@@ -92,6 +107,7 @@ class ParsedFile:
     refs: List[ParsedRef] = field(default_factory=list)
     imports: List[ParsedImport] = field(default_factory=list)
     endpoints: List[ParsedEndpoint] = field(default_factory=list)
+    components: List[ParsedComponent] = field(default_factory=list)
     has_errors: bool = False    # The file has syntax errors; what could be read is still recorded
 
 
@@ -173,10 +189,11 @@ class _Reader:
                                              node.end_point[0] + 1, _signature(node, body), **more))
         return len(self.out.symbols) - 1
 
-    def ref(self, kind: str, name: str, node: Node, scope: Optional[int], receiver: str = "", args: int = -1) -> None:
+    def ref(self, kind: str, name: str, node: Node, scope: Optional[int], receiver: str = "", args: int = -1,
+            chain: str = "") -> None:
         if name:
             self.out.refs.append(ParsedRef(kind, name, node.start_point[0] + 1, node.start_point[1] + 1, scope,
-                                           receiver, args))
+                                           receiver, args, chain))
 
     def endpoint(self, side: str, method: str, path: str, node: Node, scope: Optional[int], framework: str) -> None:
         self.out.endpoints.append(ParsedEndpoint(side, method, path, node.start_point[0] + 1, scope, framework))
@@ -200,6 +217,24 @@ def _java_type_name(node: Optional[Node]) -> str:
     if node.type in ("generic_type", "array_type", "annotated_type"):
         return next((name for c in node.named_children if (name := _java_type_name(c))), "")
     return ""
+
+
+def _java_type_full(node: Optional[Node]) -> str:
+    """A type as written, keeping one level of type arguments and array brackets: "List<User>", "String[]", "long"."""
+    if node is None:
+        return ""
+    if node.type == "generic_type":
+        name = _java_type_full(node.named_children[0]) if node.named_children else ""
+        arguments = next((c for c in node.named_children if c.type == "type_arguments"), None)
+        inner = ", ".join(_java_type_full(c) for c in arguments.named_children) if arguments is not None else ""
+        return f"{name}<{inner}>" if inner else name
+    if node.type == "array_type":
+        return _java_type_full(node.child_by_field_name("element")) + "[]"
+    if node.type == "annotated_type":
+        return next((_java_type_full(c) for c in node.named_children if c.type != "annotation"), "")
+    if node.type == "wildcard":
+        return "?"
+    return _text(node)
 
 
 def join_paths(prefix: str, path: str) -> str:
@@ -233,28 +268,34 @@ class _JavaReader(_Reader):
         if kind in ("method_declaration", "constructor_declaration", "compact_constructor_declaration"):
             return self.method(node, scope, container, variables, prefix)
         if kind == "field_declaration":
-            type_name = _java_type_name(node.child_by_field_name("type"))
+            type_name = _java_type_full(node.child_by_field_name("type"))
             for declarator in node.children_by_field_name("declarator"):
                 name = _text(declarator.child_by_field_name("name"))
                 variables[name] = type_name
-                self.symbol("field", name, f"{container}#{name}", scope, node, declarator.child_by_field_name("value"))
+                self.symbol("field", name, f"{container}#{name}", scope, node, declarator.child_by_field_name("value"),
+                            type=type_name)
         elif kind == "enum_constant":
             name = _text(node.child_by_field_name("name"))
             self.symbol("field", name, f"{container}#{name}", scope, node, node.child_by_field_name("body"))
         elif kind in ("local_variable_declaration", "formal_parameter", "spread_parameter", "enhanced_for_statement",
                       "catch_formal_parameter", "resource"):
-            type_name = _java_type_name(node.child_by_field_name("type")) or next(
-                (_java_type_name(c) for c in node.named_children if c.type == "catch_type"), "")
-            names = [d.child_by_field_name("name") for d in node.children_by_field_name("declarator")]
-            names.append(node.child_by_field_name("name"))
-            names += [c.child_by_field_name("name") for c in node.named_children if c.type == "variable_declarator"]
+            type_name = _java_type_full(node.child_by_field_name("type")) or next(
+                (_java_type_full(c) for c in node.named_children if c.type == "catch_type"), "")
+            declarators = node.children_by_field_name("declarator") + [c for c in node.named_children if c.type == "variable_declarator"]
+            names = [d.child_by_field_name("name") for d in declarators] + [node.child_by_field_name("name")]
             for name in names:
                 if name is not None and type_name and type_name != "var":
                     variables[_text(name)] = type_name
+            if type_name == "var":   # var x = …: known by what it's given
+                for declarator in declarators:
+                    path = self.chain(declarator.child_by_field_name("value"), variables)
+                    if path:
+                        variables[_text(declarator.child_by_field_name("name"))] = path
         elif kind == "method_invocation":
             self.ref("call", _text(node.child_by_field_name("name")), node.child_by_field_name("name"), scope,
                      self.receiver(node.child_by_field_name("object"), variables),
-                     node.child_by_field_name("arguments").named_child_count)
+                     node.child_by_field_name("arguments").named_child_count,
+                     chain=self.chain(node.child_by_field_name("object"), variables))
         elif kind == "method_reference":   # Type::method, this::method
             target = node.named_children[0] if node.named_children else None
             name = node.named_children[-1] if node.named_child_count > 1 else None
@@ -289,12 +330,48 @@ class _JavaReader(_Reader):
             return "super"
         if node.type == "identifier":
             name = _text(node)
-            return variables.get(name) or (name if name[:1].isupper() else "")  # A variable's type, or a static call
+            declared = variables.get(name, "")
+            if declared.startswith(("T:", "N:", "new ", "this")):   # A var: its chain is followed by the linker
+                return ""
+            return declared.split("<")[0] or (name if name[:1].isupper() else "")  # A variable's type, or a static call
         if node.type == "field_access" and node.child_by_field_name("object").type == "this":
-            return variables.get(_text(node.child_by_field_name("field")), "")
+            return variables.get(_text(node.child_by_field_name("field")), "").split("<")[0]
         if node.type in ("scoped_identifier", "field_access"):
             text = _text(node)
             return text if re.fullmatch(r"(?:[a-z_]\w*\.)*[A-Z]\w*(?:\.[A-Z]\w*)*", text) else ""  # pkg.Type.method()
+        return ""
+
+    def chain(self, node: Optional[Node], variables: Dict[str, str]) -> str:
+        """The receiver as a path from a known base (see ParsedRef.chain), or "" when it can't be followed."""
+        if node is None or node.type == "this":
+            return "this"
+        if node.type == "super":
+            return "super"
+        if node.type == "identifier":
+            name = _text(node)
+            declared = variables.get(name)
+            if declared:
+                return declared if declared.startswith(("T:", "N:", "new ", "this")) else f"T:{declared}"
+            return f"N:{name}"
+        if node.type == "scoped_identifier":
+            return f"N:{_text(node)}"
+        if node.type == "field_access":
+            base = self.chain(node.child_by_field_name("object"), variables)
+            return f"{base}.{_text(node.child_by_field_name('field'))}" if base else ""
+        if node.type == "method_invocation":
+            base = self.chain(node.child_by_field_name("object"), variables)
+            return f"{base}.{_text(node.child_by_field_name('name'))}()" if base else ""
+        if node.type == "object_creation_expression":
+            return f"new {_java_type_full(node.child_by_field_name('type'))}"
+        if node.type == "parenthesized_expression" and node.named_child_count == 1:
+            return self.chain(node.named_children[0], variables)
+        if node.type == "cast_expression":
+            return f"T:{_java_type_full(node.child_by_field_name('type'))}"
+        if node.type == "array_access":
+            base = self.chain(node.child_by_field_name("array"), variables)
+            return f"{base}.[]" if base else ""
+        if node.type == "string_literal":
+            return "T:String"
         return ""
 
     def type_declaration(self, node: Node, scope: Optional[int], container: str, variables: Dict[str, str]) -> None:
@@ -324,7 +401,7 @@ class _JavaReader(_Reader):
             # Fields first: methods above a field's declaration still call through it
             for child in body.named_children:
                 if child.type == "field_declaration":
-                    type_name = _java_type_name(child.child_by_field_name("type"))
+                    type_name = _java_type_full(child.child_by_field_name("type"))
                     for declarator in child.children_by_field_name("declarator"):
                         members[_text(declarator.child_by_field_name("name"))] = type_name
             self.visit(body, index, qualified, members, prefix)
@@ -355,7 +432,8 @@ class _JavaReader(_Reader):
         modifiers = next((c for c in node.named_children if c.type == "modifiers"), None)
         index = self.symbol("constructor" if constructor else "method", name, f"{container}#{name}", scope, node, body,
                             params=parameters.named_child_count if parameters is not None else 0,
-                            exported="public" in _text(modifiers).split())
+                            exported="public" in _text(modifiers).split(),
+                            type=container.rsplit(".", 1)[-1] if constructor else _java_type_full(node.child_by_field_name("type")))
         if modifiers is not None:
             self.spring_or_jaxrs(modifiers, prefix, index)
         local = dict(variables)
@@ -403,6 +481,28 @@ _FUNCTIONS = ("arrow_function", "function_expression", "function", "generator_fu
 _SCRIPT_TYPES = {"class_declaration": "class", "abstract_class_declaration": "class", "class": "class",
                  "interface_declaration": "interface", "type_alias_declaration": "type", "enum_declaration": "enum"}
 _SERVER_RECEIVER = re.compile(r"^(?:app|router|routes?|server|api)$|(?:Router|Routes|App)$", re.IGNORECASE)
+# Calls that wrap a component without changing what it is: export default memo(X) exports X
+_WRAPPERS = {"memo", "forwardRef", "observer", "connect", "styled", "withRouter", "injectIntl", "inject"}
+_COMPONENT_DECORATORS = ("Component", "Directive")
+_SCOPES = ("function_declaration", "generator_function_declaration", "method_definition", "arrow_function",
+           "function_expression", "function", "generator_function")
+
+
+def _type_of_chain(chain: str) -> str:
+    """The type a chain base states outright ("T:User" → "User", "new X" → "X"); "" when it has to be followed."""
+    if chain.startswith("T:"):
+        return chain[2:]
+    if chain.startswith("new "):
+        return chain[4:]
+    return ""
+
+
+def _ts_type(annotation: Optional[Node]) -> str:
+    """A TypeScript type as written, without the colon: "User[]", "Observable<User[]>", "Promise<void>"."""
+    if annotation is None:
+        return ""
+    inner = annotation.named_children[0] if annotation.type == "type_annotation" and annotation.named_child_count else annotation
+    return " ".join(_text(inner).split())
 
 
 class _ScriptReader(_Reader):
@@ -410,6 +510,7 @@ class _ScriptReader(_Reader):
         self.bindings: Dict[str, str] = {}   # Imported local names (a use of one is a reference worth keeping)
         self.exports: List[Tuple[str, bool]] = []   # (local name, is default) named after their declaration
         self.generics = _type_parameters(root)
+        self.locals: List[Dict[str, str]] = [{}]   # Per function: a name → what it is, as a chain base ("T:User", "new X")
         for node in root.named_children:    # Imports first: uses above a late require() still count
             self.collect_imports(node)
         for node in root.named_children:
@@ -486,11 +587,42 @@ class _ScriptReader(_Reader):
 
     def visit(self, node: Node, scope: Optional[int], container: str, top: bool = False,
               exported: bool = False, default: bool = False) -> None:
+        if node.type in _SCOPES:   # A function's locals are its own
+            self.locals.append({})
+            try:
+                return self._visit(node, scope, container, top, exported, default)
+            finally:
+                self.locals.pop()
+        return self._visit(node, scope, container, top, exported, default)
+
+    def local(self, name: str) -> str:
+        for frame in reversed(self.locals):
+            if name in frame:
+                return frame[name]
+        return ""
+
+    def _visit(self, node: Node, scope: Optional[int], container: str, top: bool = False,
+               exported: bool = False, default: bool = False) -> None:
         kind = node.type
         if kind == "import_statement":
             return
         if kind == "export_statement":
             return self.export(node, scope, container, top)
+        if kind == "decorator":
+            return self.decorator(node, scope, container)
+        if kind in ("required_parameter", "optional_parameter"):
+            pattern = node.child_by_field_name("pattern")
+            declared = _ts_type(node.child_by_field_name("type"))
+            if pattern is not None and pattern.type == "identifier" and declared:
+                self.locals[-1][_text(pattern)] = f"T:{declared}"
+            return self.children(node, scope, container, skip=("pattern",))
+        if kind == "variable_declarator" and not top:
+            target, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if target is not None and target.type == "identifier":
+                known = f"T:{_ts_type(node.child_by_field_name('type'))}" if node.child_by_field_name("type") else self.chain(value)
+                if known and known != "T:":
+                    self.locals[-1][_text(target)] = known
+            return self.children(node, scope, container, skip=("name",))
         if kind in ("function_declaration", "generator_function_declaration", "function_signature"):
             name = _text(node.child_by_field_name("name")) or "default"
             index = self.function(node, "function", name, scope, container, exported, default)
@@ -504,6 +636,8 @@ class _ScriptReader(_Reader):
             return
         if kind == "expression_statement" and top and self.commonjs_export(node, scope):
             return
+        if kind == "await_expression":
+            return self.children(node, scope, container)
         if kind == "call_expression":
             self.call(node, scope)
             # The called name is recorded by the call itself; what it's reached through (a nested
@@ -518,7 +652,9 @@ class _ScriptReader(_Reader):
         elif kind == "new_expression":
             name, receiver = self.callee(node.child_by_field_name("constructor"))
             arguments = node.child_by_field_name("arguments")
-            self.ref("new", name, node, scope, receiver, arguments.named_child_count if arguments is not None else 0)
+            self.ref("new", name, node, scope, receiver, arguments.named_child_count if arguments is not None else 0,
+                     chain=self.chain(node.child_by_field_name("constructor").child_by_field_name("object"))
+                     if node.child_by_field_name("constructor").type == "member_expression" else "")
             return self.children(node, scope, container, skip=("constructor",))
         elif kind in ("jsx_opening_element", "jsx_self_closing_element"):
             name, receiver = self.callee(node.child_by_field_name("name"))
@@ -556,18 +692,37 @@ class _ScriptReader(_Reader):
         parameters = function_node.child_by_field_name("parameters")
         params = parameters.named_child_count if parameters is not None else (
             1 if function_node.child_by_field_name("parameter") is not None else 0)
-        return self.symbol(kind, name, self.qualify(container, name, member), scope, node,
-                           function_node.child_by_field_name("body"), params=params, exported=exported, default=default)
+        returns = _ts_type(function_node.child_by_field_name("return_type"))
+        if not returns and kind == "constructor":
+            returns = container.rsplit(".", 1)[-1]
+        index = self.symbol(kind, name, self.qualify(container, name, member), scope, node,
+                            function_node.child_by_field_name("body"), params=params, exported=exported, default=default,
+                            type=returns)
+        if kind == "constructor" and parameters is not None and scope is not None:
+            # constructor(private users: UserService): a parameter property declares a field
+            for parameter in parameters.named_children:
+                pattern = parameter.child_by_field_name("pattern")
+                if pattern is not None and any(c.type == "accessibility_modifier" for c in parameter.children):
+                    self.symbol("field", _text(pattern), self.qualify(container, _text(pattern), True), scope, parameter,
+                                type=_ts_type(parameter.child_by_field_name("type")))
+        return index
 
     def export(self, node: Node, scope: Optional[int], container: str, top: bool) -> None:
         default = any(c.type == "default" for c in node.children)
         declaration = node.child_by_field_name("declaration")
         if declaration is not None:
-            return self.visit(declaration, scope, container, top=True, exported=True, default=default)
+            before = len(self.out.symbols)
+            self.visit(declaration, scope, container, top=True, exported=True, default=default)
+            for decorator in node.children_by_field_name("decorator"):   # @Component(…) export class X
+                self.decorator(decorator, before if len(self.out.symbols) > before else scope, container)
+            return
         value = node.child_by_field_name("value")
         if value is not None:   # export default <expression>
             if value.type == "identifier":
                 self.exports.append((_text(value), True))
+            elif value.type == "call_expression" and self.wrapped(value):
+                self.exports.append((self.wrapped(value), True))   # export default memo(X): X is the export
+                return self.visit(value, scope, container)
             elif value.type in _FUNCTIONS:
                 index = self.function(node, "function", "default", scope, container, True, True, function_node=value)
                 return self.children(value, index, "default")
@@ -582,6 +737,42 @@ class _ScriptReader(_Reader):
                 for spec in child.named_children:
                     self.exports.append((_text(spec.child_by_field_name("name")),
                                          _text(spec.child_by_field_name("alias")) == "default"))
+
+    def wrapped(self, call: Node) -> str:
+        """The top-level symbol a wrapper call exports: memo(X), connect(a, b)(X), styled(X)… → "X"."""
+        function, arguments = call.child_by_field_name("function"), call.child_by_field_name("arguments")
+        name = self.callee(function)[0] if function.type != "call_expression" else self.callee(function.child_by_field_name("function"))[0]
+        names = [_text(a) for a in arguments.named_children if a.type == "identifier"] if arguments is not None else []
+        declared = {s.name for s in self.out.symbols if s.parent is None}
+        candidates = [n for n in names if n in declared]
+        return candidates[0] if candidates and (name in _WRAPPERS or len(names) == 1) else ""
+
+    def decorator(self, node: Node, scope: Optional[int], container: str) -> None:
+        """@Name or @Name(args): an annotation on the decorated class or member, with Angular's metadata read."""
+        inner = node.named_children[0] if node.named_child_count else None
+        if inner is None:
+            return
+        call = inner if inner.type == "call_expression" else None
+        name, receiver = self.callee(call.child_by_field_name("function") if call else inner)
+        if not name:
+            return
+        self.ref("annotation", name, node, scope, receiver)
+        arguments = call.child_by_field_name("arguments") if call else None
+        if arguments is None:
+            return
+        options = arguments.named_children[0] if arguments.named_child_count and arguments.named_children[0].type == "object" else None
+        if name in _COMPONENT_DECORATORS and options is not None and scope is not None:
+            fields: Dict[str, Node] = {}
+            for pair in options.named_children:
+                if pair.type == "pair":
+                    fields[_text(pair.child_by_field_name("key")).strip("'\"")] = pair.child_by_field_name("value")
+            template = fields.get("template")
+            self.out.components.append(ParsedComponent(
+                symbol=scope, selector=_string(fields.get("selector")) or "",
+                template_url=_string(fields.get("templateUrl")) or "",
+                template=_string(template) or "" if template is not None else "",
+                template_line=template.start_point[0] + 1 if template is not None else 0))
+        self.children(arguments, scope, container)
 
     def commonjs_export(self, node: Node, scope: Optional[int]) -> bool:
         """module.exports = X, module.exports = {a, b}, exports.a = …, module.exports.a = …"""
@@ -637,8 +828,10 @@ class _ScriptReader(_Reader):
             elif child.type in ("extends_type_clause", "extends_clause"):   # interface A extends B
                 for item in child.named_children:
                     self.supertype("extends", item, index, qualified)
-            elif child.type in ("type_parameters", "decorator"):
+            elif child.type == "type_parameters":
                 self.visit(child, index, qualified)
+            elif child.type == "decorator":
+                self.decorator(child, index, qualified)
         if body is None:
             if node.type == "type_alias_declaration":
                 self.children(node, index, qualified, skip=("name",))
@@ -656,7 +849,8 @@ class _ScriptReader(_Reader):
                     method = self.function(member, "method", member_name, index, qualified, member=True, function_node=value)
                     self.children(value, method, qualified)
                 else:
-                    field_index = self.symbol("field", member_name, self.qualify(qualified, member_name, True), index, member, value)
+                    field_index = self.symbol("field", member_name, self.qualify(qualified, member_name, True), index, member, value,
+                                              type=_ts_type(member.child_by_field_name("type")) or _type_of_chain(self.chain(value)))
                     self.children(member, field_index, qualified, skip=("name", "property"))
             elif member.type not in ("property_signature", "enum_assignment", "property_identifier"):
                 self.visit(member, index, qualified)
@@ -688,7 +882,10 @@ class _ScriptReader(_Reader):
             return self.type_declaration(value, scope, container, exported, False) if value.child_by_field_name("name") \
                 else self.children(value, self.symbol("class", name, self.qualify(container, name), scope, statement,
                                                       value.child_by_field_name("body"), exported=exported), name)
-        index = self.symbol("variable", name, self.qualify(container, name), scope, statement, value, exported=exported)
+        declared = _ts_type(declarator.child_by_field_name("type"))
+        index = self.symbol("variable", name, self.qualify(container, name), scope, statement, value, exported=exported,
+                            type=declared or _type_of_chain(self.chain(value)))
+        self.locals[-1][name] = f"T:{declared}" if declared else self.chain(value)
         annotation = declarator.child_by_field_name("type")
         if annotation is not None:
             self.visit(annotation, index, container)
@@ -726,6 +923,48 @@ class _ScriptReader(_Reader):
             return _text(target), receiver if simple and re.fullmatch(r"[\w$.]+", receiver) else ""
         return "", ""
 
+    def chain(self, node: Optional[Node]) -> str:
+        """The receiver as a path from a known base (see ParsedRef.chain), or "" when it can't be followed."""
+        if node is None:
+            return ""
+        kind = node.type
+        if kind == "this":
+            return "this"
+        if kind == "super":
+            return "super"
+        if kind == "identifier":
+            name = _text(node)
+            return self.local(name) or f"N:{name}"
+        if kind == "member_expression":
+            base = self.chain(node.child_by_field_name("object"))
+            return f"{base}.{_text(node.child_by_field_name('property'))}" if base else ""
+        if kind == "call_expression":
+            function = node.child_by_field_name("function")
+            if function.type == "member_expression":
+                base = self.chain(function.child_by_field_name("object"))
+                return f"{base}.{_text(function.child_by_field_name('property'))}()" if base else ""
+            if function.type == "identifier":
+                return f"{self.local(_text(function)) or 'N:' + _text(function)}()"
+            return ""
+        if kind == "new_expression":
+            name, receiver = self.callee(node.child_by_field_name("constructor"))
+            return f"new {receiver + '.' if receiver else ''}{name}" if name else ""
+        if kind == "await_expression":
+            inner = self.chain(node.named_children[0] if node.named_child_count else None)
+            return f"await {inner}" if inner else ""
+        if kind in ("parenthesized_expression", "non_null_expression", "as_expression", "satisfies_expression", "type_assertion"):
+            if kind in ("as_expression", "satisfies_expression") and node.named_child_count > 1:
+                return f"T:{_ts_type(node.named_children[1])}"
+            return self.chain(node.named_children[0] if node.named_child_count else None)
+        if kind == "subscript_expression":
+            base = self.chain(node.child_by_field_name("object"))
+            return f"{base}.[]" if base else ""
+        if kind in ("string", "template_string"):
+            return "T:string"
+        if kind == "array":
+            return "T:Array"
+        return ""
+
     def call(self, node: Node, scope: Optional[int]) -> None:
         function, arguments = node.child_by_field_name("function"), node.child_by_field_name("arguments")
         name, receiver = self.callee(function)
@@ -736,7 +975,8 @@ class _ScriptReader(_Reader):
                 self.add_import(spec, node)   # A bare require("x") or a dynamic import("x")
             return
         if name:
-            self.ref("call", name, function, scope, receiver, len(args))
+            chain = self.chain(function.child_by_field_name("object")) if function.type == "member_expression" else ""
+            self.ref("call", name, function, scope, receiver, len(args), chain=chain)
         self.http(name, receiver, args, node, scope)
 
     def http(self, name: str, receiver: str, args: List[Node], node: Node, scope: Optional[int]) -> None:

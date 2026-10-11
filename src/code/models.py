@@ -40,6 +40,7 @@ class Symbol:
     exported: bool
     path: str                   # Its file
     language: str
+    type: str = ""              # Declared or return type, as written ("List<User>", "Observable<User[]>")
 
     @property
     def is_type(self) -> bool:

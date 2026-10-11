@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from src import config
-from src.code import manifests
+from src.code import manifests, templates
 from src.code.models import (BY_NAME, RESOLVED, SUPERTYPE, CallNode, Codebase, CodeFile, Dependency, Endpoint,
                              Hierarchy, Symbol, Usage)
 from src.code.parser import JAVA, TYPE_KINDS, ParsedFile, language_of, parse
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS code_symbols (
     signature   TEXT NOT NULL,
     params      INTEGER NOT NULL DEFAULT -1,
     exported    INTEGER NOT NULL DEFAULT 0,
-    is_default  INTEGER NOT NULL DEFAULT 0
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    type        TEXT NOT NULL DEFAULT ''   -- Declared or return type, as written ("List<User>")
 );
 CREATE INDEX IF NOT EXISTS code_symbols_name ON code_symbols(codebase_id, name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS code_symbols_file ON code_symbols(file_id, line);
@@ -80,7 +81,8 @@ CREATE TABLE IF NOT EXISTS code_refs (
     line        INTEGER NOT NULL,
     col         INTEGER NOT NULL,
     target_id   INTEGER,
-    target      TEXT
+    target      TEXT,
+    chain       TEXT NOT NULL DEFAULT ''   -- What it's called on, as a path for the linker; '=' when a template reader linked it
 );
 CREATE INDEX IF NOT EXISTS code_refs_name ON code_refs(codebase_id, name);
 CREATE INDEX IF NOT EXISTS code_refs_target_id ON code_refs(target_id);
@@ -101,6 +103,16 @@ CREATE TABLE IF NOT EXISTS code_imports (
 CREATE INDEX IF NOT EXISTS code_imports_file ON code_imports(file_id);
 CREATE INDEX IF NOT EXISTS code_imports_target ON code_imports(target_file);
 CREATE INDEX IF NOT EXISTS code_imports_external ON code_imports(codebase_id, external);
+-- Angular components: the selector that places them, and the template they render
+CREATE TABLE IF NOT EXISTS code_components (
+    symbol_id     INTEGER NOT NULL REFERENCES code_symbols(id) ON DELETE CASCADE,
+    codebase_id   INTEGER NOT NULL REFERENCES codebases(id) ON DELETE CASCADE,
+    selector      TEXT NOT NULL,
+    template_url  TEXT NOT NULL DEFAULT '',
+    template      TEXT NOT NULL DEFAULT '',  -- An inline template
+    template_line INTEGER NOT NULL DEFAULT 0,
+    template_file INTEGER                    -- The template's own file in the index, when templateUrl names one
+);
 CREATE TABLE IF NOT EXISTS code_deps (
     id          INTEGER PRIMARY KEY,
     codebase_id INTEGER NOT NULL REFERENCES codebases(id) ON DELETE CASCADE,
@@ -144,6 +156,69 @@ _TYPE_REF_KINDS = ("type", "new", "extends", "implements", "annotation", "jsx", 
 
 Target = Union[int, str, None]   # A symbol id, an external name, or unknown
 
+# Types that carry another type, and what their members give back: the same carrier (chainable
+# operations), the carried type (unwrapping), or a different carrier
+_CARRIERS: Dict[str, Dict[str, str]] = {
+    "Optional": {"get": "@", "orElse": "@", "orElseGet": "@", "orElseThrow": "@", "map": "Optional", "filter": "Optional"},
+    "List": {"get": "@", "stream": "Stream", "iterator": "Iterator", "subList": "List", "getFirst": "@", "getLast": "@"},
+    "ArrayList": {"get": "@", "stream": "Stream", "iterator": "Iterator"},
+    "Set": {"stream": "Stream", "iterator": "Iterator"},
+    "Collection": {"stream": "Stream", "iterator": "Iterator"},
+    "Iterable": {"iterator": "Iterator"},
+    "Stream": {"filter": "Stream", "map": "Stream", "sorted": "Stream", "distinct": "Stream", "limit": "Stream",
+               "skip": "Stream", "peek": "Stream", "findFirst": "Optional", "findAny": "Optional", "min": "Optional", "max": "Optional"},
+    "Iterator": {"next": "@"},
+    "Array": {"filter": "Array", "map": "Array", "slice": "Array", "concat": "Array", "sort": "Array", "reverse": "Array",
+              "find": "@", "pop": "@", "shift": "@", "at": "@"},
+    "Promise": {"then": "Promise", "catch": "Promise", "finally": "Promise"},
+    "Observable": {"pipe": "Observable"},
+    "Subject": {"pipe": "Observable", "asObservable": "Observable"},
+    "BehaviorSubject": {"pipe": "Observable", "asObservable": "Observable", "getValue": "@"},
+}
+_CARRIER_PACKAGES = {"Optional": "java.util", "List": "java.util", "ArrayList": "java.util", "Set": "java.util",
+                     "Collection": "java.util", "Iterable": "java.lang", "Stream": "java.util.stream", "Iterator": "java.util",
+                     "Observable": "rxjs", "Subject": "rxjs", "BehaviorSubject": "rxjs"}
+_BUILTINS = {"Array", "Promise", "Map", "Set", "Date", "RegExp", "string", "number", "boolean", "Object", "Function",
+             "Element", "HTMLElement", "Document", "Window", "Response", "Error", "unknown", "any", "void", "never"}
+
+
+def _split_type(text: str) -> Tuple[str, str]:
+    """("List", "User") for "List<User>"; ("Array", "User") for "User[]"; ("Map", "V") for "Map<K, V>"."""
+    text = text.strip()
+    if text.endswith("[]"):
+        return "Array", text[:-2]
+    if "<" in text and text.endswith(">"):
+        base, inner = text.split("<", 1)
+        arguments, depth, current = [], 0, ""
+        for char in inner[:-1]:
+            depth += (char == "<") - (char == ">")
+            if char == "," and depth == 0:
+                arguments.append(current.strip())
+                current = ""
+            else:
+                current += char
+        arguments.append(current.strip())
+        return base.strip().split(".")[-1] if base.strip()[:1].isupper() else base.strip(), arguments[-1] if arguments else ""
+    return text, ""
+
+
+def _chain_steps(chain: str) -> Tuple[str, List[str]]:
+    """("this", ["service", "find()"]) for "this.service.find()"; the base keeps its own dots ("T:java.util.List<User>")."""
+    if chain.startswith("await "):
+        base, steps = _chain_steps(chain[6:])
+        return "await " + base, steps
+    for prefix in ("T:", "N:", "new "):
+        if chain.startswith(prefix):
+            rest = chain[len(prefix):]
+            # A type's own dots ("Map.Entry", "pkg.Type") stay with it: steps start at the first lower-case name or call
+            parts = rest.split(".")
+            keep = 1
+            while keep < len(parts) and parts[keep][:1].isupper() and not parts[keep].endswith("()") and "<" not in parts[keep - 1]:
+                keep += 1
+            return prefix + ".".join(parts[:keep]), parts[keep:]
+    parts = chain.split(".")
+    return parts[0], parts[1:]
+
 
 def normalize_path(path: str) -> str:
     """
@@ -183,9 +258,19 @@ def java_package(qualified: str) -> str:
     return ".".join(parts[:end])
 
 
+# Columns added after the first release of the code index; CREATE TABLE IF NOT EXISTS won't add them
+_ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''")], "code_refs": [("chain", "TEXT NOT NULL DEFAULT ''")]}
+
+
 class CodeStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns:
+                if existing and name not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        self.conn.commit()
         self.conn.executescript(_SCHEMA)
         self._lines: Dict[int, List[str]] = {}   # File text by line, for the few files being looked at
 
@@ -238,7 +323,7 @@ class CodeStore:
         if not root.is_dir():
             raise ValueError(f"The folder {codebase.root} can't be read. If it was moved, remove it and add it again.")
 
-        sources, build_files, configs = _scan(root)
+        sources, build_files, configs, templates = _scan(root)
         known = {row["path"]: (row["id"], row["sha256"]) for row in self.conn.execute(
             "SELECT id, path, sha256 FROM code_files WHERE codebase_id = ?", (codebase_id,))}
         changed = 0
@@ -255,7 +340,7 @@ class CodeStore:
             if on_progress and (done % 20 == 0 or done == len(sources)):
                 on_progress(READING, done, len(sources))
 
-        present = set(sources)
+        present = set(sources) | self._store_templates(codebase_id, root, set(templates), known)
         removed = [file_id for path, (file_id, _) in known.items() if path not in present]
         with self.conn:
             for file_id in removed:
@@ -284,6 +369,41 @@ class CodeStore:
         self._lines.clear()
         return {"files": files, "changed": changed, "removed": len(removed), "symbols": symbols}
 
+    def _store_templates(self, codebase_id: int, root: Path, available: Set[str], known: Dict[str, tuple]) -> Set[str]:
+        """
+        Angular templates named by components (`templateUrl`) are kept as files of the index, so their
+        references open in them and their text is searchable. Returns the paths kept.
+        """
+        kept: Set[str] = set()
+        rows = self.conn.execute(
+            "SELECT c.symbol_id, c.template_url, f.path FROM code_components c JOIN code_symbols s ON s.id = c.symbol_id "
+            "JOIN code_files f ON f.id = s.file_id WHERE c.codebase_id = ? AND c.template_url != ''", (codebase_id,)).fetchall()
+        for row in rows:
+            relative = posixpath.normpath(posixpath.join(posixpath.dirname(row["path"]), row["template_url"]))
+            if relative not in available:
+                continue
+            kept.add(relative)
+            try:
+                data = _as_utf8((root / relative).read_bytes())
+            except OSError:
+                continue
+            sha256 = hashlib.sha256(data).hexdigest()
+            file_id, old_sha = known.get(relative, (None, None))
+            if old_sha != sha256:
+                with self.conn:
+                    if file_id is not None:
+                        self._delete_file(file_id)
+                    text = data.decode("utf-8", "replace")
+                    file_id = self.conn.execute(
+                        "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors) "
+                        "VALUES (?, ?, 'html', ?, ?, ?, 0)",
+                        (codebase_id, relative, posixpath.dirname(relative), sha256, text.count("\n") + 1)).lastrowid
+                    self.conn.execute("INSERT INTO code_text (rowid, content) VALUES (?, ?)", (file_id, text))
+                    known[relative] = (file_id, sha256)
+            with self.conn:
+                self.conn.execute("UPDATE code_components SET template_file = ? WHERE symbol_id = ?", (file_id, row["symbol_id"]))
+        return kept
+
     def _delete_file(self, file_id: int) -> None:
         self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (file_id,))
         self.conn.execute("DELETE FROM code_files WHERE id = ?", (file_id,))   # The rest cascades
@@ -305,15 +425,21 @@ class CodeStore:
         symbol_id = lambda index: None if index is None else first + index   # Parsed symbols refer to each other by position
         self.conn.executemany(
             "INSERT INTO code_symbols (id, codebase_id, file_id, parent_id, kind, name, qualified, line, end_line, "
-            "signature, params, exported, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "signature, params, exported, is_default, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(first + i, codebase_id, file_id, symbol_id(s.parent), s.kind, s.name, s.qualified, s.line, s.end_line,
-              s.signature, s.params, int(s.exported), int(s.default)) for i, s in enumerate(parsed.symbols)],
+              s.signature, s.params, int(s.exported), int(s.default), s.type) for i, s in enumerate(parsed.symbols)],
         )
         self.conn.executemany(
-            "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(codebase_id, file_id, symbol_id(r.scope), r.kind, r.name, r.receiver, r.args, r.line, r.col)
+            "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col, chain) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(codebase_id, file_id, symbol_id(r.scope), r.kind, r.name, r.receiver, r.args, r.line, r.col, r.chain)
              for r in parsed.refs],
+        )
+        self.conn.executemany(
+            "INSERT INTO code_components (symbol_id, codebase_id, selector, template_url, template, template_line) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(symbol_id(c.symbol), codebase_id, c.selector, c.template_url, c.template, c.template_line)
+             for c in parsed.components],
         )
         self.conn.executemany(
             "INSERT INTO code_imports (codebase_id, file_id, line, spec, is_static, names) VALUES (?, ?, ?, ?, ?, ?)",
@@ -335,6 +461,28 @@ class CodeStore:
     def file(self, file_id: int) -> Optional[CodeFile]:
         row = self.conn.execute("SELECT * FROM code_files WHERE id = ?", (file_id,)).fetchone()
         return _file(row) if row else None
+
+    def relink(self, file_id: int) -> None:
+        """
+        Links a changed file's references again, and the references elsewhere to what it declares,
+        without re-linking the whole codebase (for the editor: a save must settle in well under a second).
+        """
+        file = self.file(file_id)
+        if file is None:
+            return
+        _Linker(self.conn, file.codebase_id, self._aliases(file.codebase_id)).run(None, only_files=[file_id])
+
+    def _aliases(self, codebase_id: int) -> list:
+        codebase = self.get(codebase_id)
+        if codebase is None:
+            return []
+        root = Path(codebase.root)
+        found = []
+        for relative in _scan(root)[2]:
+            aliases = manifests.read_aliases(_read_text(root / relative))
+            if aliases:
+                found.append((posixpath.dirname(relative), *aliases))
+        return found
 
     def lines(self, file_id: int) -> List[str]:
         """A file's text as it was when indexed, by line."""
@@ -676,7 +824,7 @@ def _symbol(row: sqlite3.Row) -> Symbol:
     return Symbol(id=row["id"], codebase_id=row["codebase_id"], file_id=row["file_id"], parent_id=row["parent_id"],
                   kind=row["kind"], name=row["name"], qualified=row["qualified"], line=row["line"],
                   end_line=row["end_line"], signature=row["signature"], params=row["params"],
-                  exported=bool(row["exported"]), path=row["path"], language=row["language"])
+                  exported=bool(row["exported"]), path=row["path"], language=row["language"], type=row["type"])
 
 
 def _package_of_target(target: str) -> str:
@@ -701,9 +849,9 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _scan(root: Path) -> Tuple[List[str], List[str], List[str]]:
-    """Source files, build files and tsconfig/jsconfig files under a folder, as sorted relative paths."""
-    sources, build_files, configs = [], [], []
+def _scan(root: Path) -> Tuple[List[str], List[str], List[str], List[str]]:
+    """Source files, build files, tsconfig/jsconfig files and HTML files under a folder, as sorted relative paths."""
+    sources, build_files, configs, templates = [], [], [], []
     for folder, folders, names in os.walk(root):
         # Build output, dependencies and tool folders hold no source of the project's own
         folders[:] = sorted(d for d in folders if d not in config.CODE_SKIP_FOLDERS and not d.startswith("."))
@@ -713,13 +861,15 @@ def _scan(root: Path) -> Tuple[List[str], List[str], List[str]]:
                 build_files.append(relative)
             elif name in manifests.SCRIPT_CONFIGS:
                 configs.append(relative)
+            elif name.lower().endswith(".html"):
+                templates.append(relative)
             elif language_of(name) and not _SKIPPED_FILE.search(name):
                 try:
                     if (Path(folder) / name).stat().st_size <= config.CODE_MAX_FILE_BYTES:
                         sources.append(relative)
                 except OSError:
                     pass
-    return sources, build_files, configs
+    return sources, build_files, configs, templates
 
 
 class _Linker:
@@ -729,7 +879,8 @@ class _Linker:
         self.conn, self.codebase_id = conn, codebase_id
         self.aliases = sorted(aliases, key=lambda a: -len(a[0]))   # Nearest config first
 
-    def run(self, on_progress: Optional[StageCallback]) -> None:
+    def run(self, on_progress: Optional[StageCallback], only_files: Optional[Sequence[int]] = None) -> None:
+        """Links every reference, or (`only_files`) those in some files and those elsewhere to what they declare."""
         conn, cid = self.conn, self.codebase_id
         self.files = {row["id"]: row for row in conn.execute("SELECT * FROM code_files WHERE codebase_id = ?", (cid,))}
         self.by_path = {row["path"]: file_id for file_id, row in self.files.items()}
@@ -752,10 +903,31 @@ class _Linker:
         self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
 
         self._link_imports()
-        refs = conn.execute("SELECT id, file_id, from_symbol, kind, name, receiver, args FROM code_refs "
-                            "WHERE codebase_id = ? ORDER BY (kind IN ('extends', 'implements')) DESC, id", (cid,)).fetchall()
         self.supers: Dict[int, List[int]] = defaultdict(list)          # Type → the types it extends or implements
         self.external_supers: Dict[int, List[str]] = defaultdict(list)
+        self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
+        where = "codebase_id = ? AND chain != '='"
+        params: list = [cid]
+        if only_files is not None:
+            # The files' own references; references to what they declare (now or before: a re-parsed file's
+            # old symbols are gone, leaving dangling links); references in files importing them; and
+            # by-name references that may now find a declaration here
+            marks = ", ".join("?" * len(only_files))
+            where += (f" AND (file_id IN ({marks})"
+                      f" OR target_id IN (SELECT id FROM code_symbols WHERE file_id IN ({marks}))"
+                      f" OR (target_id IS NOT NULL AND target_id NOT IN (SELECT id FROM code_symbols))"
+                      f" OR file_id IN (SELECT file_id FROM code_imports WHERE target_file IN ({marks}))"
+                      f" OR (target_id IS NULL AND target IS NULL AND name IN (SELECT name FROM code_symbols WHERE file_id IN ({marks}))))")
+            params += [*only_files] * 4
+            # Inheritance elsewhere is as linked before
+            for row in conn.execute("SELECT from_symbol, target_id, target FROM code_refs WHERE codebase_id = ? "
+                                    "AND kind IN ('extends', 'implements') AND from_symbol IS NOT NULL", (cid,)):
+                if row["target_id"] is not None:
+                    self.supers[row["from_symbol"]].append(row["target_id"])
+                elif row["target"]:
+                    self.external_supers[row["from_symbol"]].append(row["target"])
+        refs = conn.execute(f"SELECT id, file_id, from_symbol, kind, name, receiver, args, chain FROM code_refs "
+                            f"WHERE {where} ORDER BY (kind IN ('extends', 'implements')) DESC, id", params).fetchall()
         updates = []
         for done, ref in enumerate(refs, 1):
             target = self._link(ref)
@@ -769,6 +941,51 @@ class _Linker:
                 on_progress(LINKING, done, len(refs))
         with conn:
             conn.executemany("UPDATE code_refs SET target_id = ?, target = ? WHERE id = ?", updates)
+        self._templates(only_files)
+
+    # -- Angular templates -----------------------------------------------------------------------
+
+    def _templates(self, only_files: Optional[Sequence[int]]) -> None:
+        """References made in components' templates, linked here since the components are now known."""
+        rows = self.conn.execute(
+            "SELECT c.*, s.file_id, s.name FROM code_components c JOIN code_symbols s ON s.id = c.symbol_id "
+            "WHERE c.codebase_id = ?", (self.codebase_id,)).fetchall()
+        selectors = {row["selector"].lower(): row["symbol_id"] for row in rows if row["selector"]}
+        names = {row["symbol_id"]: row["name"] for row in rows}
+        inserts = []
+        touched = set()
+        for row in rows:
+            file_id, offset = (row["template_file"], 0) if row["template_file"] else (row["file_id"], row["template_line"] - 1)
+            if only_files is not None and file_id not in only_files and row["file_id"] not in only_files:
+                continue
+            if row["template_file"]:
+                text_row = self.conn.execute("SELECT content FROM code_text WHERE rowid = ?", (file_id,)).fetchone()
+                text = text_row[0] if text_row else ""
+            else:
+                text = row["template"]
+            if not text:
+                continue
+            touched.add(file_id)
+            host = row["symbol_id"]
+            for ref in templates.read_template(text, {s: names[i] for s, i in selectors.items()}):
+                line = ref.line + offset
+                if ref.kind == "jsx":
+                    target: Target = selectors.get(ref.component)
+                elif ref.kind == "binding":
+                    child = selectors.get(ref.component)
+                    target = self._method(child, ref.name, -1, ("field", "variable", "method")) if child is not None else None
+                else:
+                    target = self._method(host, ref.name, ref.args, ("method", "field", "variable", "function"))
+                kind = "use" if ref.kind == "binding" else ref.kind
+                inserts.append((self.codebase_id, file_id, host, kind, ref.name, "this", ref.args, line, ref.col,
+                                target if isinstance(target, int) else None, None))
+        with self.conn:
+            if touched:
+                self.conn.execute(f"DELETE FROM code_refs WHERE chain = '=' AND file_id IN ({', '.join('?' * len(touched))})",
+                                  list(touched))
+            self.conn.executemany(
+                "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col, target_id, target, chain) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '=')", inserts)
 
     # -- Imports ---------------------------------------------------------------------------------
 
@@ -864,7 +1081,120 @@ class _Linker:
 
     def _link(self, ref: sqlite3.Row) -> Target:
         java = self.files[ref["file_id"]]["language"] == JAVA
+        if ref["chain"] and ref["kind"] in ("call", "new", "use", "type"):
+            owner, _ = self._follow(ref["chain"], ref["file_id"], ref["from_symbol"], java)
+            if isinstance(owner, int):
+                kinds = ("constructor",) if ref["kind"] == "new" else ("method", "function", "field", "variable")
+                found = self._method(owner, ref["name"], ref["args"], kinds)
+                if found is not None:
+                    return found
+                if ref["kind"] == "new":
+                    return self._method(owner, ref["name"], ref["args"], ("constructor",)) or None
+            elif isinstance(owner, str) and ref["kind"] != "new":
+                return f"{owner}{'.' if '#' in owner else '#'}{ref['name']}"
         return self._link_java(ref) if java else self._link_script(ref)
+
+    def _type_of(self, symbol_id: int) -> Tuple[Target, str]:
+        """A symbol's type as a target (a type of the codebase, or an outside name) and the type it carries."""
+        if symbol_id in self._types:
+            return self._types[symbol_id]
+        self._types[symbol_id] = (None, "")   # Against cycles while it's worked out
+        symbol = self.symbols.get(symbol_id)
+        if symbol is None:
+            return None, ""
+        java = self.files[symbol["file_id"]]["language"] == JAVA
+        result = self._resolve_type(symbol["type"], symbol["file_id"], self._enclosing_type(symbol["parent_id"]), java)
+        if result[0] is None and symbol["kind"] in TYPE_KINDS:   # A type is its own type (static access)
+            result = (symbol_id, "")
+        self._types[symbol_id] = result
+        return result
+
+    def _resolve_type(self, text: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str]:
+        base, carried = _split_type(text)
+        if not base:
+            return None, ""
+        if base in _CARRIER_PACKAGES and java and not self._java_type(base, file_id, within):
+            return f"{_CARRIER_PACKAGES[base]}.{base}", carried
+        if java:
+            return self._java_type(base, file_id, within), carried
+        found, _ = self._binding(file_id, base)
+        if isinstance(found, int) or isinstance(found, str):
+            return found, carried
+        if base in _CARRIER_PACKAGES:
+            return f"{_CARRIER_PACKAGES[base]}#{base}", carried
+        if base in _BUILTINS or base in _CARRIERS:
+            return f"#{base}", carried   # A built-in: not an outside package's API, but its carried type is still known
+        return None, ""
+
+    def _carrier_step(self, owner: str, member: str, carried: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str]:
+        """What a member of a carrier type gives back: the same carrier, what it carries, or another carrier."""
+        base = owner.split("#")[-1].split(".")[-1]
+        gives = _CARRIERS.get(base, {}).get(member)
+        if gives is None:
+            return None, ""
+        if gives == "@":
+            return self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+        if gives == base:
+            return owner, carried
+        return self._resolve_type(f"{gives}<{carried}>" if carried else gives, file_id, within, java)
+
+    def _follow(self, chain: str, file_id: int, from_symbol: Optional[int], java: bool) -> Tuple[Target, str]:
+        """Follows a receiver chain from its base to the type the last step gives."""
+        base, steps = _chain_steps(chain)
+        within = self._enclosing_type(from_symbol)
+        current: Target = None
+        carried = ""
+        awaited = base.startswith("await ")
+        if awaited:
+            base = base[6:]
+        if base == "this":
+            current = within
+        elif base == "super":
+            current = next(iter(self.supers.get(within, [])), None) if within is not None else None
+            if current is None and within is not None and len(self.external_supers.get(within, [])) == 1:
+                current = self.external_supers[within][0]
+        elif base.startswith("T:"):
+            current, carried = self._resolve_type(base[2:], file_id, within, java)
+        elif base.startswith("new "):
+            current, carried = self._resolve_type(base[4:], file_id, within, java)
+        elif base.startswith("N:"):
+            name = base[2:]
+            if java:
+                scope = within
+                while scope is not None and current is None:   # A field of the class, or of the classes around it
+                    field = self._method(scope, name.split(".")[0], -1, ("field",))
+                    if field is not None:
+                        current, carried = self._type_of(field)
+                        steps = name.split(".")[1:] + steps
+                    scope = self._enclosing_type(self.symbols[scope]["parent_id"])
+                if current is None:
+                    current = self._java_type(name, file_id, within)   # A static call on a type
+            else:
+                found, module = self._binding(file_id, name)
+                if isinstance(found, int):
+                    current, carried = self._type_of(found) if self.symbols[found]["kind"] not in TYPE_KINDS else (found, "")
+                elif isinstance(found, str):
+                    current = found
+                elif module is not None:
+                    current = self.default.get(module)
+        if awaited and isinstance(current, str) and current.split("#")[-1] in ("Promise", "Observable"):
+            current, carried = self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+        for step in steps:
+            if current is None:
+                return None, ""
+            member, call = (step[:-2], True) if step.endswith("()") else (step, False)
+            if step == "[]":
+                current, carried = self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+                continue
+            if isinstance(current, int):
+                kinds = ("method", "function") if call else ("field", "variable", "method", "function")
+                found = self._method(current, member, -1, kinds)
+                if found is None:
+                    return None, ""
+                current, carried = self._type_of(found)
+            else:
+                current, carried = self._carrier_step(current, member, carried, file_id, within, java)
+        return current, carried
 
     def _java_type(self, name: str, file_id: int, within: Optional[int]) -> Target:
         """Resolves a type name as javac would: enclosing types, imports, the package, then java.lang."""

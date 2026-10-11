@@ -184,8 +184,14 @@ inheritance and scope. Every link is labelled:
   without compiling the code (a chained call, a lambda parameter, most of dynamic JavaScript). Check
   these before relying on them.
 
-It doesn't compile the code, so it won't match an IDE for calls through inferred types, reflection or
-dependency injection. JavaScript and TypeScript are read file by file: `.js`, `.jsx`, `.mjs`, `.cjs`,
+It doesn't compile the code, but it follows types along the way: declared and return types, chained
+calls (`repository.find(id).orElse(…)`, `this.users.list().subscribe(…)`), constructor-injected
+services, decorators, and the types that carry others (`Optional`, `List`, `Promise`, `Observable`).
+Angular templates are read as code: a component's selector, its inputs and outputs, and the members
+its template binds and calls all show as usages. React components, hooks and wrapped exports
+(`export default memo(X)`) link too. It won't match an IDE for reflection, generics beyond one level,
+or types inferred inside callbacks. `python -m src.evaluate_code <folder>` reports the share of calls
+left by name, per language. JavaScript and TypeScript are read file by file: `.js`, `.jsx`, `.mjs`, `.cjs`,
 `.ts`, `.tsx`. Build output and downloaded dependencies (`node_modules`, `target`, `build`, `dist`, `out`,
 folders starting with a dot), minified bundles, `.d.ts` files and files over 1 MB are skipped; the list
 is `CODE_SKIP_FOLDERS` in `src/config.py`.

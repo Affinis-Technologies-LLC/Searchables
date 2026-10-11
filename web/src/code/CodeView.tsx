@@ -2,6 +2,7 @@ import * as monaco from "monaco-editor/esm/vs/editor/edcore.main";
 import "monaco-editor/esm/vs/basic-languages/java/java.contribution";
 import "monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution";
 import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution";
+import "monaco-editor/esm/vs/basic-languages/html/html.contribution";   // Angular templates
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { useEffect, useRef } from "react";
 import { api } from "../api";
@@ -12,7 +13,7 @@ import { useFile } from "./files";
 
 (self as unknown as { MonacoEnvironment: object }).MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
-const LANGUAGES = ["java", "javascript", "typescript"];
+const LANGUAGES = ["java", "javascript", "typescript", "html"];
 
 function lookUp(fileId: number, position: monaco.IPosition): Promise<At> {
   return api.get<At>(`/code/files/${fileId}/at?line=${position.lineNumber}&col=${position.column}`);

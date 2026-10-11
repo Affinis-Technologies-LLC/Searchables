@@ -216,6 +216,7 @@ export interface CodeSymbol {
   exported: boolean;
   path: string;
   language: string;
+  type: string;             // Declared or return type, as written
 }
 
 export interface Usage {

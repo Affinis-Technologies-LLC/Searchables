@@ -250,3 +250,51 @@ def test_manifests():
         == ("src", {"~/*": ["lib/*"]})
     gradle = manifests.read_manifest("build.gradle.kts", 'dependencies { api(group = "a.b", name = "c", version = "1") }')
     assert gradle == [("gradle", "a.b:c", "1", "api")]
+
+
+def test_java_chained_calls_follow_return_types(store, code):
+    controller = next(f for f in store.files(code.id) if f.path.endswith("UserController.java"))
+    rows = store.conn.execute("SELECT name, target, target_id FROM code_refs WHERE file_id = ? AND line = 20 AND kind = 'call'", (controller.id,)).fetchall()
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["orElse"]["target"] == "java.util.Optional#orElse"
+    service = next(f for f in store.files(code.id) if f.path.endswith("UserService.java"))
+    rows = {r["name"]: r for r in store.conn.execute("SELECT name, target FROM code_refs WHERE file_id = ? AND line = 13", (service.id,))}
+    assert rows["stream"]["target"] == "java.util.List#stream" and rows["filter"]["target"] == "java.util.stream.Stream#filter"
+
+
+def test_java_symbols_know_their_types(store, code):
+    assert find(store, code, "com.acme.service.UserService#find").type == "Optional<User>"
+    assert find(store, code, "com.acme.service.UserService#users").type == "List<User>"
+    assert find(store, code, "com.acme.model.User#getId").type == "long"
+
+
+def test_relinking_one_file_matches_a_full_pass(store, code):
+    """After a save, only the changed file and the references to what it declares are linked again."""
+    root = Path(code.root)
+    service = root / "backend/src/main/java/com/acme/service/UserService.java"
+    service.write_text(service.read_text().replace("private void audit(String what)", "private void audit(String what, int level)")
+                       .replace('audit("save")', 'audit("save", 1)'))
+    file_id = next(f.id for f in store.files(code.id) if f.path.endswith("UserService.java"))
+    data = service.read_bytes()
+    import hashlib
+    with store.conn:
+        store._store_file(code.id, "backend/src/main/java/com/acme/service/UserService.java", data, hashlib.sha256(data).hexdigest(), file_id)
+    new_id = next(f.id for f in store.files(code.id) if f.path.endswith("UserService.java"))
+    store.relink(new_id)
+    partial = store.conn.execute("SELECT name, line, target_id, target FROM code_refs WHERE codebase_id = ? ORDER BY file_id, line, col, name", (code.id,)).fetchall()
+    audit = find(store, code, "com.acme.service.UserService#audit")
+    assert audit.params == 2 and [u.line for u in store.usages(audit)] == [18]
+    # The controller's call into the service, in another file, is linked to the new symbol ids too
+    save = find(store, code, "com.acme.service.UserService#save", params=2)
+    assert [u.path.rsplit("/", 1)[-1] for u in store.usages(save)] == ["UserController.java"]
+    store.index(code.id)
+    full = store.conn.execute("SELECT name, line, target_id, target FROM code_refs WHERE codebase_id = ? ORDER BY file_id, line, col, name", (code.id,)).fetchall()
+    assert [tuple(r) for r in partial] == [tuple(r) for r in full]
+
+
+def test_evaluate_code_reports_the_by_name_share(tmp_path):
+    from src.evaluate_code import measure
+    lines = []
+    results = measure(str(SAMPLE), tmp_path / "measure.db", out=lines.append)
+    assert results["java"]["calls"]["by_name"] <= 4 and results["java"]["calls"]["share"] < 0.3
+    assert results["typescript"]["calls"]["linked"] >= 2 and any("by name:" in line for line in lines)
