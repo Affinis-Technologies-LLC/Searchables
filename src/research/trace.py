@@ -41,6 +41,7 @@ class Mention:
     text: str
     certainty: str              # exact, name
     symbol: str = ""            # By-name mentions: the symbol named after the identifier
+    changed: str = ""           # When the line last changed, from git blame (ADR-026); "" without a repository or not committed
 
 
 @dataclass

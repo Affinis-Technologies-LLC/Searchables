@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from src import config
-from src.code import classfiles, manifests, templates
-from src.code.models import (BY_NAME, RESOLVED, SUPERTYPE, CallNode, Codebase, CodeFile, Dependency, Endpoint,
+from src.code import classfiles, declarations, frameworks, manifests, templates
+from src.code.models import (BY_NAME, RESOLVED, RULE, SUPERTYPE, CallNode, Codebase, CodeFile, Dependency, Endpoint,
                              Hierarchy, Symbol, Usage)
 from src.code.parser import JAVA, TYPE_KINDS, ParsedFile, language_of, parse
 
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     lines       INTEGER NOT NULL,
     has_errors  INTEGER NOT NULL DEFAULT 0,
     form        TEXT NOT NULL DEFAULT '',  -- How the file is written on disk: encoding, byte-order mark, line endings (JSON)
+    parser      INTEGER NOT NULL DEFAULT 0,  -- PARSER_VERSION the file was read with; older files are read again on the next scan
     UNIQUE (codebase_id, path)
 );
 CREATE TABLE IF NOT EXISTS code_symbols (
@@ -71,7 +72,8 @@ CREATE TABLE IF NOT EXISTS code_symbols (
     params      INTEGER NOT NULL DEFAULT -1,
     exported    INTEGER NOT NULL DEFAULT 0,
     is_default  INTEGER NOT NULL DEFAULT 0,
-    type        TEXT NOT NULL DEFAULT ''   -- Declared or return type, as written ("List<User>")
+    type        TEXT NOT NULL DEFAULT '',  -- Declared or return type, as written ("List<User>")
+    type_params TEXT NOT NULL DEFAULT ''   -- A type's type parameters: "T, ID" (ADR-024)
 );
 CREATE INDEX IF NOT EXISTS code_symbols_name ON code_symbols(codebase_id, name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS code_symbols_file ON code_symbols(file_id, line);
@@ -94,7 +96,10 @@ CREATE TABLE IF NOT EXISTS code_refs (
     chain       TEXT NOT NULL DEFAULT '',  -- What it's called on, as a path for the linker; '=' when a template reader linked it
     shape       TEXT NOT NULL DEFAULT '',  -- Kinds of the statements around a call (parser.statement_shape), for ranking examples
     stmt_start  INTEGER NOT NULL DEFAULT 0,
-    stmt_end    INTEGER NOT NULL DEFAULT 0
+    stmt_end    INTEGER NOT NULL DEFAULT 0,
+    type_args   TEXT NOT NULL DEFAULT '',  -- extends/implements: the type arguments written; calls: explicit ones (ADR-024)
+    callback    TEXT NOT NULL DEFAULT '',  -- Calls whose one-expression lambda types their result: "v:<chain>" / "a:<chain>"
+    via         TEXT NOT NULL DEFAULT ''   -- 'rule' when the link came from a framework rule, not a declaration
 );
 CREATE INDEX IF NOT EXISTS code_refs_name ON code_refs(codebase_id, name);
 CREATE INDEX IF NOT EXISTS code_refs_unlinked ON code_refs(codebase_id, name) WHERE target_id IS NULL AND target IS NULL;  -- By-name references a save may now link
@@ -142,13 +147,14 @@ CREATE TABLE IF NOT EXISTS code_deps (
     version     TEXT NOT NULL,
     scope       TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS code_jars (          -- Library archives read for their public API (ADR-017), shared by codebases
+CREATE TABLE IF NOT EXISTS code_jars (          -- Library sources read for their public API (ADR-017 archives, ADR-024 packages), shared by codebases
     id          INTEGER PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,
     size        INTEGER NOT NULL,
     mtime       REAL NOT NULL,
     classes     INTEGER NOT NULL DEFAULT 0,
-    read_at     TEXT NOT NULL
+    read_at     TEXT NOT NULL,
+    format      INTEGER NOT NULL DEFAULT 2       -- How the rows were written: 2 tracks every type variable ($T0, $T1…)
 );
 CREATE TABLE IF NOT EXISTS code_library (       -- Classes and public members of those archives
     id          INTEGER PRIMARY KEY,
@@ -163,7 +169,8 @@ CREATE TABLE IF NOT EXISTS code_library (       -- Classes and public members of
     is_static   INTEGER NOT NULL DEFAULT 0,
     signature   TEXT NOT NULL DEFAULT '',
     supers      TEXT NOT NULL DEFAULT '',       -- Classes: supertypes, comma-separated
-    type_params TEXT NOT NULL DEFAULT ''
+    type_params TEXT NOT NULL DEFAULT '',       -- Classes: "T,ID"; TypeScript members: the method's own ("T" in get<T>())
+    language    TEXT NOT NULL DEFAULT 'java'    -- java (class files, ADR-017) or typescript (.d.ts files, ADR-024)
 );
 CREATE INDEX IF NOT EXISTS code_library_qualified ON code_library(qualified);
 CREATE INDEX IF NOT EXISTS code_library_owner ON code_library(owner, name);
@@ -224,7 +231,7 @@ _SCRIPT_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".ct
 _SKIPPED_FILE = re.compile(r"\.min\.[cm]?js$|\.bundle\.js$|\.d\.[cm]?ts$")
 # What a symbol of each kind can be referred to by, when only the name is known
 _NAME_KINDS = {"method": ("call",), "constructor": ("new",), "function": ("call", "new", "jsx", "use"),
-               "variable": ("use", "call"), "field": ()}
+               "variable": ("use", "call"), "field": ("use",)}
 _TYPE_REF_KINDS = ("type", "new", "extends", "implements", "annotation", "jsx", "use")
 
 Target = Union[int, str, None]   # A symbol id, an external name, or unknown
@@ -241,6 +248,8 @@ _CARRIERS: Dict[str, Dict[str, str]] = {
     "Stream": {"filter": "Stream", "map": "Stream", "sorted": "Stream", "distinct": "Stream", "limit": "Stream",
                "skip": "Stream", "peek": "Stream", "findFirst": "Optional", "findAny": "Optional", "min": "Optional", "max": "Optional"},
     "Iterator": {"next": "@"},
+    "Map": {"get": "@", "getOrDefault": "@", "remove": "@", "put": "@", "computeIfAbsent": "@"},   # Carries its value type (the last argument)
+    "HashMap": {"get": "@", "getOrDefault": "@", "remove": "@", "put": "@", "computeIfAbsent": "@"},
     "Array": {"filter": "Array", "map": "Array", "slice": "Array", "concat": "Array", "sort": "Array", "reverse": "Array",
               "find": "@", "pop": "@", "shift": "@", "at": "@"},
     "Promise": {"then": "Promise", "catch": "Promise", "finally": "Promise"},
@@ -250,7 +259,21 @@ _CARRIERS: Dict[str, Dict[str, str]] = {
 }
 _CARRIER_PACKAGES = {"Optional": "java.util", "List": "java.util", "ArrayList": "java.util", "Set": "java.util",
                      "Collection": "java.util", "Iterable": "java.lang", "Stream": "java.util.stream", "Iterator": "java.util",
+                     "Map": "java.util", "HashMap": "java.util",
                      "Observable": "rxjs", "Subject": "rxjs", "BehaviorSubject": "rxjs"}
+# Members whose callback is handed the carried element or value, by parameter index (ADR-024): `orders.forEach(o -> …)`
+# makes `o` an Order. Only these; a member not listed leaves its callback's parameters untyped.
+_CALLBACK_PARAMS: Dict[str, Tuple[int, ...]] = {
+    "forEach": (0,), "forEachOrdered": (0,), "map": (0,), "flatMap": (0,), "filter": (0,), "find": (0,), "findIndex": (0,),
+    "some": (0,), "every": (0,), "anyMatch": (0,), "allMatch": (0,), "noneMatch": (0,), "removeIf": (0,), "peek": (0,),
+    "takeWhile": (0,), "dropWhile": (0,), "sorted": (0, 1), "sort": (0, 1), "min": (0, 1), "max": (0, 1), "reduce": (1,),
+    "ifPresent": (0,), "ifPresentOrElse": (0,), "then": (0,), "subscribe": (0,),
+    "pipe:map": (0,), "pipe:tap": (0,), "pipe:filter": (0,), "pipe:switchMap": (0,), "pipe:mergeMap": (0,), "pipe:concatMap": (0,),
+    "pipe:exhaustMap": (0,),
+}
+_WRAPPERS_UNWRAPPED = {"Promise", "Observable", "Stream", "Optional"}
+_GLOBAL_RETURNS = {"fetch": "Promise<Response>", "structuredClone": "any"}   # What a platform global gives back, when no lib.dom.d.ts is read   # A callback's result of one of these is unwrapped by flatMap/then
+_STEP = re.compile(r"^([\w$]+)(?:<(.*)>)?(?:\((?:λ(\d+):(\d+))?\))?$")
 _BUILTINS = {"Array", "Promise", "Map", "Set", "Date", "RegExp", "string", "number", "boolean", "Object", "Function",
              "Element", "HTMLElement", "Document", "Window", "Response", "Error", "unknown", "any", "void", "never"}
 # Globals of browsers and Node that are called or used without an import: linked as "#name" (the same spelling as
@@ -263,11 +286,11 @@ _GLOBALS = {"fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval
             "process", "Buffer", "require", "module", "globalThis", "queueMicrotask", "atob", "btoa"}
 
 
-def _split_type(text: str) -> Tuple[str, str]:
-    """("List", "User") for "List<User>"; ("Array", "User") for "User[]"; ("Map", "V") for "Map<K, V>"."""
+def _split_args(text: str) -> Tuple[str, List[str]]:
+    """("List", ["User"]) for "List<User>"; ("Array", ["User"]) for "User[]"; ("Map", ["K", "V"]) for "Map<K, V>"."""
     text = text.strip()
     if text.endswith("[]"):
-        return "Array", text[:-2]
+        return "Array", [text[:-2]]
     if "<" in text and text.endswith(">"):
         base, inner = text.split("<", 1)
         arguments, depth, current = [], 0, ""
@@ -279,8 +302,38 @@ def _split_type(text: str) -> Tuple[str, str]:
             else:
                 current += char
         arguments.append(current.strip())
-        return base.strip().split(".")[-1] if base.strip()[:1].isupper() else base.strip(), arguments[-1] if arguments else ""
-    return text, ""
+        base = base.strip()
+        return base.split(".")[-1] if base[:1].isupper() else base, [a for a in arguments if a]
+    return text, []
+
+
+def _split_type(text: str) -> Tuple[str, str]:
+    """("List", "User") for "List<User>"; ("Array", "User") for "User[]"; ("Map", "V") for "Map<K, V>": what it carries."""
+    base, arguments = _split_args(text)
+    return base, arguments[-1] if arguments else ""
+
+
+def _split_dots(text: str) -> List[str]:
+    """Splits on the dots outside type arguments and parentheses: "map<a.B>().x" → ["map<a.B>()", "x"]."""
+    parts, depth, current = [], 0, ""
+    for char in text:
+        depth += (char in "<(") - (char in ">)")
+        if char == "." and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += char
+    parts.append(current)
+    return parts
+
+
+def _parse_step(step: str) -> Tuple[str, bool, str, Optional[Tuple[int, int]]]:
+    """(member, is a call, explicit type arguments, the lambda position) of "get<User>(λ12:5)"."""
+    match = _STEP.match(step)
+    if match is None:
+        return step, False, "", None
+    name, type_args, line, col = match.groups()
+    return name, step.endswith(")"), type_args or "", (int(line), int(col)) if line else None
 
 
 def _chain_steps(chain: str) -> Tuple[str, List[str]]:
@@ -288,16 +341,20 @@ def _chain_steps(chain: str) -> Tuple[str, List[str]]:
     if chain.startswith("await "):
         base, steps = _chain_steps(chain[6:])
         return "await " + base, steps
+    if chain.startswith("C:"):   # A callback's parameter: everything up to its "#index" is the base
+        end = max(m.end() for m in re.finditer(r"#\d+", chain))
+        rest = chain[end:]
+        return chain[:end], _split_dots(rest[1:]) if rest.startswith(".") else []
     for prefix in ("T:", "N:", "new "):
         if chain.startswith(prefix):
             rest = chain[len(prefix):]
             # A type's own dots ("Map.Entry", "pkg.Type") stay with it: steps start at the first lower-case name or call
-            parts = rest.split(".")
+            parts = _split_dots(rest)
             keep = 1
-            while keep < len(parts) and parts[keep][:1].isupper() and not parts[keep].endswith("()") and "<" not in parts[keep - 1]:
+            while keep < len(parts) and parts[keep][:1].isupper() and not parts[keep].endswith(")") and "<" not in parts[keep - 1]:
                 keep += 1
             return prefix + ".".join(parts[:keep]), parts[keep:]
-    parts = chain.split(".")
+    parts = _split_dots(chain)
     return parts[0], parts[1:]
 
 
@@ -340,11 +397,17 @@ def java_package(qualified: str) -> str:
 
 
 # Columns added after the first release of the code index; CREATE TABLE IF NOT EXISTS won't add them
-_PARSED_COLUMNS = {"type", "chain", "shape"}   # Filled by the parser: an index from before they existed must be re-read
-_ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''")],
+_PARSED_COLUMNS = {"type", "chain", "shape", "type_params", "type_args", "callback", "parser"}
+PARSER_VERSION = 2   # Bumped when the parser records more from the same file (2: member accesses as references, ADR-025)   # Filled by the parser: an index from before they existed must be re-read
+_ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''"), ("type_params", "TEXT NOT NULL DEFAULT ''")],
                   "code_refs": [("chain", "TEXT NOT NULL DEFAULT ''"), ("shape", "TEXT NOT NULL DEFAULT ''"),
-                                ("stmt_start", "INTEGER NOT NULL DEFAULT 0"), ("stmt_end", "INTEGER NOT NULL DEFAULT 0")],
-                  "code_files": [("form", "TEXT NOT NULL DEFAULT ''")]}
+                                ("stmt_start", "INTEGER NOT NULL DEFAULT 0"), ("stmt_end", "INTEGER NOT NULL DEFAULT 0"),
+                                ("type_args", "TEXT NOT NULL DEFAULT ''"), ("callback", "TEXT NOT NULL DEFAULT ''"),
+                                ("via", "TEXT NOT NULL DEFAULT ''")],
+                  "code_files": [("form", "TEXT NOT NULL DEFAULT ''"), ("parser", "INTEGER NOT NULL DEFAULT 0")],
+                  "code_library": [("language", "TEXT NOT NULL DEFAULT 'java'")],
+                  "code_jars": [("format", "INTEGER NOT NULL DEFAULT 1")]}
+LIBRARY_FORMAT = 2
 
 
 class CodeStore:
@@ -361,6 +424,8 @@ class CodeStore:
             self.conn.execute("UPDATE code_files SET sha256 = ''")
         self.conn.commit()
         self.conn.executescript(_SCHEMA)
+        with self.conn:
+            self.conn.execute("UPDATE code_files SET sha256 = '' WHERE parser < ? AND language != 'html'", (PARSER_VERSION,))
         self._lines: Dict[int, List[str]] = {}   # File text by line, for the few files being looked at
         self._linkers: Dict[int, "_Linker"] = {}  # Per codebase, kept warm between saves; dropped by a rescan
 
@@ -418,6 +483,7 @@ class CodeStore:
         known = {row["path"]: (row["id"], row["sha256"]) for row in self.conn.execute(
             "SELECT id, path, sha256 FROM code_files WHERE codebase_id = ?", (codebase_id,))}
         changed = 0
+        pending = 0   # Files stored since the last commit: committed in batches (an interrupted scan keeps what was committed)
         for done, relative in enumerate(sources, 1):
             try:
                 raw = (root / relative).read_bytes()
@@ -426,11 +492,15 @@ class CodeStore:
             data = _as_utf8(raw)
             sha256 = hashlib.sha256(data).hexdigest()
             if known.get(relative, (None, None))[1] != sha256:
-                with self.conn:
-                    self._store_file(codebase_id, relative, data, sha256, known.get(relative, (None,))[0], _form_of(raw))
+                self._store_file(codebase_id, relative, data, sha256, known.get(relative, (None,))[0], _form_of(raw))
                 changed += 1
+                pending += 1
+                if pending >= 50:
+                    self.conn.commit()
+                    pending = 0
             if on_progress and (done % 20 == 0 or done == len(sources)):
                 on_progress(READING, done, len(sources))
+        self.conn.commit()
 
         present = set(sources) | self._store_templates(codebase_id, root, set(templates), known)
         removed = [file_id for path, (file_id, _) in known.items() if path not in present]
@@ -449,8 +519,9 @@ class CodeStore:
             found = manifests.read_aliases(_read_text(root / relative))
             if found:
                 aliases.append((posixpath.dirname(relative), *found))
-        libraries_changed = self._read_libraries(codebase_id, on_progress) if any(f["language"] == JAVA for f in
-                                                                                  self.conn.execute("SELECT language FROM code_files WHERE codebase_id = ? LIMIT 10000", (codebase_id,))) else False
+        languages = {f["language"] for f in self.conn.execute("SELECT DISTINCT language FROM code_files WHERE codebase_id = ?", (codebase_id,))}
+        libraries_changed = self._read_libraries(codebase_id, root, on_progress, java=JAVA in languages,
+                                                 script=bool(languages & {"typescript", "javascript"}))
         self._linkers.pop(codebase_id, None)   # A rescan starts afresh
         if changed or removed or libraries_changed or not codebase.indexed_at:   # Otherwise every link still stands
             _Linker(self.conn, codebase_id, aliases).run(on_progress)
@@ -495,42 +566,51 @@ class CodeStore:
 
     # ---- Libraries (ADR-017) ---------------------------------------------------------------
 
-    def _read_libraries(self, codebase_id: int, on_progress: Optional[StageCallback]) -> bool:
+    def _read_libraries(self, codebase_id: int, root: Path, on_progress: Optional[StageCallback], java: bool, script: bool) -> bool:
         """
-        Reads the public API of the JDK and of the declared dependencies found in the local Maven and
-        Gradle caches, once per archive. Returns whether the codebase's set of archives changed.
+        Reads the public API of the libraries a codebase sees, once per source: the JDK and the declared
+        Maven/Gradle dependencies found in the local caches (class files, ADR-017); the declared npm
+        packages found in node_modules and TypeScript's own lib (declaration files, ADR-024). Returns
+        whether the codebase's set of sources changed.
         """
-        if os.environ.get("SEARCHABLES_LIBRARIES", "1") == "0":   # Switched off (the test suite does, where libraries aren't the point)
-            archives: List[Path] = []
-        else:
-            archives = classfiles.jdk_archives(classfiles.jdk_home())
-        for row in self.conn.execute("SELECT ecosystem, name, version FROM code_deps WHERE codebase_id = ? AND ecosystem IN ('maven', 'gradle')", (codebase_id,)):
-            group, _, artifact = row["name"].partition(":")
-            jar = classfiles.find_jar(group, artifact, row["version"])
-            if jar is not None:
-                archives.append(jar)
+        off = os.environ.get("SEARCHABLES_LIBRARIES", "1") == "0"   # Switched off (the test suite does, where libraries aren't the point)
+        sources: List[Tuple[Path, Path, str]] = []   # (what to stat, the source, the npm package name or "" for an archive / the TS lib)
+        if java and not off:
+            sources += [(a, a, "") for a in classfiles.jdk_archives(classfiles.jdk_home())]
+        if java:
+            for row in self.conn.execute("SELECT ecosystem, name, version FROM code_deps WHERE codebase_id = ? AND ecosystem IN ('maven', 'gradle')", (codebase_id,)):
+                group, _, artifact = row["name"].partition(":")
+                jar = classfiles.find_jar(group, artifact, row["version"])
+                if jar is not None:
+                    sources.append((jar, jar, ""))
+        if script:
+            declared = [(row["manifest"], row["name"]) for row in self.conn.execute(
+                "SELECT manifest, name FROM code_deps WHERE codebase_id = ? AND ecosystem = 'npm' ORDER BY manifest, name", (codebase_id,))]
+            for folder, package in declarations.declaration_sources(root, declared):
+                marker = folder / "package.json" if package else folder / "lib.es5.d.ts"
+                sources.append((marker, folder, package or "typescript"))
         before = {row["jar_id"] for row in self.conn.execute("SELECT jar_id FROM code_codebase_jars WHERE codebase_id = ?", (codebase_id,))}
         jar_ids = []
-        for i, archive in enumerate(archives):
+        for i, (marker, source, package) in enumerate(sources):
             try:
-                stat = archive.stat()
+                stat = marker.stat()
             except OSError:
                 continue
-            row = self.conn.execute("SELECT id, size, mtime FROM code_jars WHERE path = ?", (str(archive),)).fetchone()
-            if row is not None and row["size"] == stat.st_size and abs(row["mtime"] - stat.st_mtime) < 1:
+            row = self.conn.execute("SELECT id, size, mtime, format FROM code_jars WHERE path = ?", (str(source),)).fetchone()
+            if row is not None and row["size"] == stat.st_size and abs(row["mtime"] - stat.st_mtime) < 1 and row["format"] == LIBRARY_FORMAT:
                 jar_ids.append(row["id"])
                 continue
             if on_progress:
-                on_progress("Reading libraries", i, len(archives))
+                on_progress("Reading libraries", i, len(sources))
             with self.conn:
                 if row is not None:
                     self.conn.execute("DELETE FROM code_jars WHERE id = ?", (row["id"],))
-                jar_id = self.conn.execute("INSERT INTO code_jars (path, size, mtime, classes, read_at) VALUES (?, ?, ?, 0, ?)",
-                                           (str(archive), stat.st_size, stat.st_mtime, datetime.now().isoformat(timespec="seconds"))).lastrowid
-                count, rows = _archive_rows(archive, stat)
+                jar_id = self.conn.execute("INSERT INTO code_jars (path, size, mtime, classes, read_at, format) VALUES (?, ?, ?, 0, ?, ?)",
+                                           (str(source), stat.st_size, stat.st_mtime, datetime.now().isoformat(timespec="seconds"), LIBRARY_FORMAT)).lastrowid
+                count, rows = _archive_rows(source, stat) if not package else _package_rows(source, "" if package == "typescript" else package, stat)
                 self.conn.executemany(
-                    "INSERT INTO code_library (jar_id, qualified, kind, name, owner, params, returns, carried, is_static, signature, supers, type_params) "
-                    f"VALUES ({jar_id}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                    "INSERT INTO code_library (jar_id, qualified, kind, name, owner, params, returns, carried, is_static, signature, supers, type_params, language) "
+                    f"VALUES ({jar_id}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
                 self.conn.execute("UPDATE code_jars SET classes = ? WHERE id = ?", (count, jar_id))
             jar_ids.append(jar_id)
         with self.conn:
@@ -588,14 +668,14 @@ class CodeStore:
                 self.conn.execute(f"DELETE FROM {table} WHERE file_id = ?", (old_id,))
             self.conn.execute("DELETE FROM code_text WHERE rowid = ?", (old_id,))
             self.conn.execute(
-                "UPDATE code_files SET path = ?, language = ?, package = ?, sha256 = ?, lines = ?, has_errors = ?, form = ? WHERE id = ?",
-                (path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form, old_id))
+                "UPDATE code_files SET path = ?, language = ?, package = ?, sha256 = ?, lines = ?, has_errors = ?, form = ?, parser = ? WHERE id = ?",
+                (path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form, PARSER_VERSION, old_id))
             file_id = old_id
         else:
             file_id = self.conn.execute(
-                "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors, form) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (codebase_id, path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form),
+                "INSERT INTO code_files (codebase_id, path, language, package, sha256, lines, has_errors, form, parser) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (codebase_id, path, parsed.language, package, sha256, text.count("\n") + 1, int(parsed.has_errors), form, PARSER_VERSION),
             ).lastrowid
         self.conn.execute("INSERT INTO code_text (rowid, content) VALUES (?, ?)", (file_id, text))
 
@@ -610,15 +690,15 @@ class CodeStore:
         symbol_id = lambda index: None if index is None else ids[index]
         self.conn.executemany(
             "INSERT INTO code_symbols (id, codebase_id, file_id, parent_id, kind, name, qualified, line, end_line, "
-            "signature, params, exported, is_default, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "signature, params, exported, is_default, type, type_params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(ids[i], codebase_id, file_id, symbol_id(s.parent), s.kind, s.name, s.qualified, s.line, s.end_line,
-              s.signature, s.params, int(s.exported), int(s.default), s.type) for i, s in enumerate(parsed.symbols)],
+              s.signature, s.params, int(s.exported), int(s.default), s.type, s.type_params) for i, s in enumerate(parsed.symbols)],
         )
         self.conn.executemany(
             "INSERT INTO code_refs (codebase_id, file_id, from_symbol, kind, name, receiver, args, line, col, chain, "
-            "shape, stmt_start, stmt_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "shape, stmt_start, stmt_end, type_args, callback) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(codebase_id, file_id, symbol_id(r.scope), r.kind, r.name, r.receiver, r.args, r.line, r.col, r.chain,
-              r.shape, r.stmt_start, r.stmt_end) for r in parsed.refs],
+              r.shape, r.stmt_start, r.stmt_end, r.type_args, r.callback) for r in parsed.refs],
         )
         self.conn.executemany(
             "INSERT INTO code_components (symbol_id, codebase_id, selector, template_url, template, template_line) "
@@ -952,7 +1032,7 @@ class CodeStore:
         return [
             Usage(ref_id=row["id"], kind=row["kind"], name=row["name"], line=row["line"], col=row["col"],
                   file_id=row["file_id"], path=row["path"], text=self._line(row["file_id"], row["line"]),
-                  from_symbol=row["from_symbol"], from_name=row["from_name"] or "", certainty=certainty,
+                  from_symbol=row["from_symbol"], from_name=row["from_name"] or "", certainty=RULE if row["via"] == RULE else certainty,
                   target_id=row["target_id"], target=row["target"] or "")
             for row in rows
         ]
@@ -1197,14 +1277,28 @@ def _archive_rows(archive: Path, stat: os.stat_result) -> Tuple[int, list]:
     for info in classfiles.read_archive(archive):
         count += 1
         rows.append((info.qualified, info.kind, info.qualified.rsplit(".", 1)[-1], "", -1, "", "", 0, "",
-                     ",".join(info.supers), ",".join(info.type_params)))
+                     ",".join(info.supers), ",".join(info.type_params), "java"))
         seen = set()
         for m in info.members:
             if (m.name, m.params) in seen:   # Overloads of the same arity: one is enough to resolve a call
                 continue
             seen.add((m.name, m.params))
             rows.append((f"{info.qualified}#{m.name}", m.kind, m.name, info.qualified, m.params, m.returns, m.carried,
-                         int(m.static), m.signature, "", ""))
+                         int(m.static), m.signature, "", "", "java"))
+    if len(_archives) > 8:
+        _archives.clear()
+    _archives[key] = (count, rows)
+    return _archives[key]
+
+
+def _package_rows(folder: Path, package: str, stat: os.stat_result) -> Tuple[int, list]:
+    """(type count, code_library rows without the source id) for an npm package's declaration files, or TypeScript's lib."""
+    key = (str(folder), stat.st_size, stat.st_mtime)
+    if key in _archives:
+        return _archives[key]
+    found = declarations.read_package(folder, package) if package else declarations.read_typescript_lib(folder)
+    rows = [(r.qualified, r.kind, r.name, r.owner, r.params, r.returns, "", 0, r.signature, r.supers, r.type_params, "typescript") for r in found]
+    count = sum(1 for r in found if not r.owner and r.kind not in ("function", "variable"))
     if len(_archives) > 8:
         _archives.clear()
     _archives[key] = (count, rows)
@@ -1317,21 +1411,29 @@ class _Linker:
         self.importers: Dict[int, Set[int]] = defaultdict(set)         # File → the files importing it
         self.supers: Dict[int, List[int]] = defaultdict(list)          # Type → the types it extends or implements
         self.external_supers: Dict[int, List[str]] = defaultdict(list)
+        self.super_args: Dict[int, Dict[Target, List[str]]] = defaultdict(dict)   # Type → supertype → type arguments written (ADR-024)
+        self.callbacks: Dict[int, Dict[Tuple[int, int, str], str]] = {}         # File → (line, col, member) → "v:<chain>" / "a:<chain>"
         self.affected: Set[int] = set()                                # Symbol ids a refresh replaced or added
         self.renamed: Set[str] = set()                                 # Names a refresh (re)declared
         self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
+        self._via = ""                                                 # Set by a framework rule while a reference is linked
         self._load_libraries()
         for symbol_id in sorted(self.symbols):
             self._add_symbol(symbol_id)
         self.java_packages = {f["package"] for f in self.files.values() if f["language"] == JAVA}
         self._link_imports()
-        for row in conn.execute("SELECT from_symbol, target_id, target FROM code_refs WHERE codebase_id = ? "
+        for row in conn.execute("SELECT from_symbol, target_id, target, type_args FROM code_refs WHERE codebase_id = ? "
                                 "AND kind IN ('extends', 'implements') AND from_symbol IS NOT NULL", (cid,)):
             if row["target_id"] is not None:
                 self.supers[row["from_symbol"]].append(row["target_id"])
             elif row["target"]:
                 self.external_supers[row["from_symbol"]].append(row["target"])
+            self._note_super_args(row["from_symbol"], row["target_id"] if row["target_id"] is not None else row["target"], row["type_args"])
         self.loaded = True
+
+    def _note_super_args(self, type_id: int, parent: Target, type_args: str) -> None:
+        if parent is not None and type_args:
+            self.super_args[type_id][parent] = _split_args(f"X<{type_args}>")[1]
 
     def _load_libraries(self) -> None:
         """The public API of the archives this codebase sees (ADR-017): classes, their members, simple names."""
@@ -1341,7 +1443,7 @@ class _Linker:
         for row in self.conn.execute(
                 "SELECT l.* FROM code_library l JOIN code_codebase_jars c ON c.jar_id = l.jar_id WHERE c.codebase_id = ? ORDER BY l.id",
                 (self.codebase_id,)):
-            if row["owner"]:
+            if row["owner"] or row["kind"] in ("function", "variable"):   # Members; a package's or the globals' functions (owner "")
                 self.lib_members[row["owner"]][row["name"]].append(row)
             else:
                 self.lib_classes.setdefault(row["qualified"], row)
@@ -1393,6 +1495,7 @@ class _Linker:
             del self.java_types[s["qualified"]]
         self.supers.pop(symbol_id, None)
         self.external_supers.pop(symbol_id, None)
+        self.super_args.pop(symbol_id, None)
         self._types.pop(symbol_id, None)
 
     def refresh(self, file_ids: Sequence[int]) -> None:
@@ -1410,6 +1513,8 @@ class _Linker:
         for row in conn.execute(f"SELECT * FROM code_files WHERE id IN ({marks})", list(file_ids)):
             self.files[row["id"]] = row
             self.by_path[row["path"]] = row["id"]
+        for file_id in file_ids:
+            self.callbacks.pop(file_id, None)
         self.renamed = set()
         for row in conn.execute(f"SELECT * FROM code_symbols WHERE file_id IN ({marks})", list(file_ids)):
             self.symbols[row["id"]] = row
@@ -1430,10 +1535,11 @@ class _Linker:
         if not self.loaded:
             self.load()
         self._types: Dict[int, Tuple[Target, str]] = {}                # Symbol → (its type, the type it carries), once worked out
-        columns = "id, file_id, from_symbol, kind, name, receiver, args, chain"
+        columns = "id, file_id, from_symbol, kind, name, receiver, args, chain, type_args"
         if only_files is None:
             self.supers.clear()   # Worked out afresh: inheritance references are linked first
             self.external_supers.clear()
+            self.super_args.clear()
             refs = conn.execute(f"SELECT {columns} FROM code_refs WHERE codebase_id = ? AND chain != '=' "
                                 f"ORDER BY (kind IN ('extends', 'implements')) DESC, id", (cid,)).fetchall()
         else:
@@ -1446,6 +1552,7 @@ class _Linker:
                 for sid in self.affected:
                     self.supers.pop(sid, None)
                     self.external_supers.pop(sid, None)
+                    self.super_args.pop(sid, None)
             seen: Dict[int, sqlite3.Row] = {}
             marks = ", ".join("?" * len(files))
             for row in conn.execute(f"SELECT {columns} FROM code_refs INDEXED BY code_refs_file WHERE file_id IN ({marks}) AND chain != '='",
@@ -1468,17 +1575,19 @@ class _Linker:
             refs = sorted(seen.values(), key=lambda r: (r["kind"] not in ("extends", "implements"), r["id"]))
         updates = []
         for done, ref in enumerate(refs, 1):
+            self._via = ""
             target = self._link(ref)
             if ref["kind"] in ("extends", "implements") and ref["from_symbol"] is not None:
                 if isinstance(target, int):
                     self.supers[ref["from_symbol"]].append(target)
                 elif target:
                     self.external_supers[ref["from_symbol"]].append(target)
-            updates.append((target if isinstance(target, int) else None, target if isinstance(target, str) else None, ref["id"]))
+                self._note_super_args(ref["from_symbol"], target, ref["type_args"])
+            updates.append((target if isinstance(target, int) else None, target if isinstance(target, str) else None, self._via, ref["id"]))
             if on_progress and (done % 5000 == 0 or done == len(refs)):
                 on_progress(LINKING, done, len(refs))
         with conn:
-            conn.executemany("UPDATE code_refs SET target_id = ?, target = ? WHERE id = ?", updates)
+            conn.executemany("UPDATE code_refs SET target_id = ?, target = ?, via = ? WHERE id = ?", updates)
         self._templates(only_files)
 
     # -- Angular templates -----------------------------------------------------------------------
@@ -1636,17 +1745,138 @@ class _Linker:
     def _link(self, ref: sqlite3.Row) -> Target:
         java = self.files[ref["file_id"]]["language"] == JAVA
         if ref["chain"] and ref["kind"] in ("call", "new", "use", "type"):
-            owner, _ = self._follow(ref["chain"], ref["file_id"], ref["from_symbol"], java)
+            owner, _, bindings = self._follow_bound(ref["chain"], ref["file_id"], ref["from_symbol"], java)
             if isinstance(owner, int):
                 kinds = ("constructor",) if ref["kind"] == "new" else ("method", "function", "field", "variable")
-                found = self._method(owner, ref["name"], ref["args"], kinds)
-                if found is not None:
-                    return found
+                found = self._member_bound(owner, ref["name"], ref["args"], kinds, bindings)
+                scope = owner
+                while found is None and ref["kind"] == "use" and ref["chain"] == "this" and java:   # A bare field name: the enclosing types too
+                    scope = self._enclosing_type(self.symbols[scope]["parent_id"]) if scope in self.symbols else None
+                    if scope is None:
+                        break
+                    found = self._member_bound(scope, ref["name"], -1, ("field", "variable"), {})
+                if found is not None and found[0] == "symbol":
+                    return found[1]
+                if found is not None and ref["kind"] != "new":   # Declared by a library type this type extends, or a framework rule
+                    self._via = found[4]
+                    return self._outside_name(found[1], ref["name"], java)
                 if ref["kind"] == "new":
                     return self._method(owner, ref["name"], ref["args"], ("constructor",)) or None
             elif isinstance(owner, str) and ref["kind"] != "new":
-                return self._outside_member(owner, ref["name"], ref["args"]) if java else f"{owner}{'.' if '#' in owner else '#'}{ref['name']}"
+                return self._outside_member(owner, ref["name"], ref["args"]) if java else self._outside_name(owner, ref["name"], java)
         return self._link_java(ref) if java else self._link_script(ref)
+
+    def _outside_name(self, owner: str, name: str, java: bool) -> str:
+        """"pkg.Class#member" (Java) or "package#Type.member" (TypeScript), naming the declaring type when a library knows it."""
+        if java:
+            return self._outside_member(owner, name)
+        found = self._lib_member(owner, name) if "#" in owner else None
+        declaring = found[0] if found else owner
+        return f"{declaring}{'.' if '#' in declaring else '#'}{name}"
+
+    # -- Types, with their type arguments bound (ADR-024) ------------------------------------------
+    #
+    # A type is a target (a symbol id, or an outside name) plus what it carries (the last type argument,
+    # as text) plus its bindings: the declaring type's type variables → the types they stand for here,
+    # as encoded text "=<target><<carried>>" that resolves in any file ("=12", "=java.util.List<=7>").
+
+    def _type_params_of(self, target: Target) -> List[str]:
+        if isinstance(target, int):
+            text = self.symbols[target]["type_params"] if target in self.symbols else ""
+        elif isinstance(target, str) and target in self.lib_classes:
+            text = self.lib_classes[target]["type_params"]
+        else:
+            return []
+        return [p.strip() for p in text.split(",") if p.strip()]
+
+    def _encode(self, text: str, file_id: int, within: Optional[int], java: bool, depth: int = 0) -> str:
+        """A type as written in a file, resolved there and encoded so it can be read from anywhere; "" when unknown."""
+        text = text.strip()
+        if not text or text.startswith("="):
+            return text
+        base, arguments = _split_args(text)
+        target, _ = self._resolve_type(base, file_id, within, java)
+        if target is None:
+            return ""
+        if arguments and depth < 3:
+            inner = ", ".join(self._encode(a, file_id, within, java, depth + 1) for a in arguments)
+            return f"={target}<{inner}>" if inner.strip(", ") else f"={target}"
+        return f"={target}"
+
+    @staticmethod
+    def _encode_resolved(target: Target, carried: str) -> str:
+        if target is None:
+            return ""
+        return f"={target}<{carried}>" if carried and carried.startswith("=") else f"={target}"
+
+    @staticmethod
+    def _substitute(text: str, bindings: Dict[str, str]) -> str:
+        """Type variables in a type's text replaced by what they're bound to; unbound ones stay."""
+        if not bindings or not text:
+            return text
+        return re.sub(r"(?<![\w$=.#/@])([A-Za-z_$][\w$]*)(?![\w$])", lambda m: bindings.get(m.group(1), m.group(0)), text)
+
+    def _resolve_bound(self, text: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str, Dict[str, str]]:
+        """A type as written: its target, what it carries, and its type variables bound to the arguments written."""
+        target, carried = self._resolve_type(text, file_id, within, java)
+        params = self._type_params_of(target)
+        bindings: Dict[str, str] = {}
+        if params:
+            _, arguments = _split_args(text)
+            for param, argument in zip(params, arguments):
+                encoded = self._encode(argument, file_id, within, java)
+                if encoded:
+                    bindings[param] = encoded
+        return target, carried, bindings
+
+    def _super_bindings(self, type_id: int, parent: Target, bindings: Dict[str, str]) -> Dict[str, str]:
+        """The bindings of a supertype's variables, from the arguments written where this type extends it."""
+        arguments = self.super_args.get(type_id, {}).get(parent)
+        params = self._type_params_of(parent)
+        if not arguments or not params:
+            return {}
+        symbol = self.symbols[type_id]
+        java = self.files[symbol["file_id"]]["language"] == JAVA
+        found = {}
+        for param, argument in zip(params, arguments):
+            encoded = self._encode(self._substitute(argument, bindings), symbol["file_id"], type_id, java)
+            if encoded:
+                found[param] = encoded
+        return found
+
+    def _member_bound(self, type_id: int, name: str, args: int, kinds: Tuple[str, ...], bindings: Dict[str, str],
+                      seen: Optional[Set[int]] = None):
+        """
+        A member of a type, its supertypes in the codebase, or the library types it extends, with the
+        declaring type's variables bound as seen from here:
+        ("symbol", member id, bindings) or ("outside", declaring type, library row or rule row, bindings, via).
+        """
+        seen = seen if seen is not None else set()
+        if type_id in seen or type_id not in self.symbols:
+            return None
+        seen.add(type_id)
+        candidates = [m for m in self.members[type_id].get(name, []) if m["kind"] in kinds]
+        if candidates:
+            chosen = next((m["id"] for m in candidates if args >= 0 and m["params"] == args), candidates[0]["id"])
+            return "symbol", chosen, bindings
+        for parent in self.supers.get(type_id, []):
+            found = self._member_bound(parent, name, args, kinds, self._super_bindings(type_id, parent, bindings), seen)
+            if found is not None:
+                return found
+        lib_kinds = tuple(k for k in ("method", "field") if k in kinds) or ("method",)
+        for owner in self.external_supers.get(type_id, []):
+            if "constructor" in kinds and len(kinds) == 1:
+                continue
+            parent_bindings = self._super_bindings(type_id, owner, bindings) if owner in self.lib_classes else \
+                frameworks.bindings_for(owner, self.super_args.get(type_id, {}).get(owner, []),
+                                        lambda a: self._encode(self._substitute(a, bindings), self.symbols[type_id]["file_id"], type_id, True))
+            found = self._lib_member(owner, name, args, lib_kinds)
+            if found is not None:
+                return "outside", found[0], found[1], parent_bindings, ""
+            rule = frameworks.member_of(owner, name)
+            if rule is not None:
+                return "outside", rule.declaring, rule, parent_bindings, "rule"
+        return None
 
     def _type_of(self, symbol_id: int) -> Tuple[Target, str]:
         """A symbol's type as a target (a type of the codebase, or an outside name) and the type it carries."""
@@ -1663,51 +1893,167 @@ class _Linker:
         self._types[symbol_id] = result
         return result
 
+    def _type_of_bound(self, symbol_id: int, bindings: Dict[str, str]) -> Tuple[Target, str, Dict[str, str]]:
+        """A member's type with its declaring type's variables bound: "Optional<T>" with T → Order is Optional<Order>."""
+        symbol = self.symbols.get(symbol_id)
+        if symbol is None:
+            return None, "", {}
+        if symbol["kind"] in TYPE_KINDS and not symbol["type"]:
+            return symbol_id, "", {}
+        java = self.files[symbol["file_id"]]["language"] == JAVA
+        within = self._enclosing_type(symbol["parent_id"])
+        text = self._substitute(symbol["type"], bindings)
+        if text == symbol["type"]:
+            target, carried = self._type_of(symbol_id)
+            if not self._type_params_of(target):
+                return target, carried, {}
+        return self._resolve_bound(text, symbol["file_id"], within, java)
+
     def _resolve_type(self, text: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str]:
         base, carried = _split_type(text)
         if not base:
             return None, ""
+        if base.startswith("="):   # Already resolved somewhere else and encoded
+            key = base[1:]
+            return (int(key) if key.isdigit() else key) if key else None, carried
         if base in _CARRIER_PACKAGES and java and not self._java_type(base, file_id, within):
             return f"{_CARRIER_PACKAGES[base]}.{base}", carried
         if java:
             return self._java_type(base, file_id, within), carried
         found, _ = self._binding(file_id, base)
         if isinstance(found, int) or isinstance(found, str):
-            return found, carried
+            return self._alias(found), carried
         if base in _CARRIER_PACKAGES:
             return f"{_CARRIER_PACKAGES[base]}#{base}", carried
-        if base in _BUILTINS or base in _CARRIERS:
+        if base in _BUILTINS or base in _CARRIERS or f"#{base}" in self.lib_classes:
             return f"#{base}", carried   # A built-in: not an outside package's API, but its carried type is still known
         return None, ""
 
-    def _carrier_step(self, owner: str, member: str, carried: str, file_id: int, within: Optional[int], java: bool) -> Tuple[Target, str]:
-        """What a member of a carrier type gives back: the same carrier, what it carries, or another carrier."""
-        found = self._lib_member(owner, member) if java else None
-        if found is not None:   # A library class (ADR-017): its member's return type, with type variables followed
-            _, row = found
-            returns, gives_carried = row["returns"], row["carried"]
-            if returns == "$T":
-                return self._resolve_type(carried, file_id, within, java) if carried else (None, "")
-            if not returns:
-                return None, ""
-            new_carried = carried if gives_carried == "$T" else gives_carried
-            return returns, new_carried
+    def _alias(self, target: Target) -> Target:
+        """`export { Page as PageOf }` in a package's declarations: the type it stands for."""
+        for _ in range(4):
+            row = self.lib_classes.get(target) if isinstance(target, str) else None
+            if row is None or row["kind"] != "alias" or not row["returns"]:
+                return target
+            target = row["returns"]
+        return target
+
+    def _lib_result(self, declaring: str, row, bindings: Dict[str, str], type_args: str, file_id: int, within: Optional[int],
+                    java: bool) -> Tuple[Target, str, Dict[str, str]]:
+        """What a library member gives back, its declaring type's variables (and its own, from explicit arguments) bound."""
+        returns, gives = row["returns"], row["carried"]
+        if not returns:
+            return None, "", {}
+        params = self._type_params_of(declaring) if declaring in self.lib_classes else frameworks.type_params_of(declaring)
+        if row["language"] == "typescript":
+            method_bindings = dict(bindings)
+            own = [p.strip() for p in (row["type_params"] or "").split(",") if p.strip()]
+            if own and type_args:
+                for param, argument in zip(own, _split_args(f"X<{type_args}>")[1]):
+                    encoded = self._encode(argument, file_id, within, java)
+                    if encoded:
+                        method_bindings[param] = encoded
+            return self._resolve_bound(self._substitute(returns, method_bindings), file_id, within, False)
+
+        def variable(text: str) -> Optional[str]:   # "$T0" → the bound type, "" when unbound; None when not a variable
+            if not text.startswith("$T"):
+                return None
+            index = int(text[2:] or 0)
+            return bindings.get(params[index], "") if index < len(params) else ""
+        bound = variable(returns)
+        if bound is not None:
+            return self._resolve_bound(bound, file_id, within, java) if bound else (None, "", {})
+        carried = variable(gives)
+        if carried is None:
+            carried = gives
+        result_params = self._type_params_of(returns)
+        return returns, carried, {result_params[0]: carried} if result_params and carried and carried.startswith("=") else {}
+
+    def _carrier_step(self, owner: str, member: str, carried: str, bindings: Dict[str, str], type_args: str, file_id: int,
+                      within: Optional[int], java: bool) -> Tuple[Target, str, Dict[str, str]]:
+        """What a member of an outside type gives back: from the library's declaration, else the hand-made carrier table."""
+        found = self._lib_member(owner, member)
+        if found is not None:   # A library type (ADR-017, ADR-024): the member's return type, with type variables bound
+            declaring, row = found
+            if not bindings and carried:   # Only the carried type is known: it binds the first variable (List<User>: E → User)
+                params = self._type_params_of(declaring)
+                if params:
+                    encoded = self._encode(carried, file_id, within, java)
+                    bindings = {params[0]: encoded} if encoded else {}
+            return self._lib_result(declaring, row, bindings, type_args, file_id, within, java)
         base = owner.split("#")[-1].split(".")[-1]
         gives = _CARRIERS.get(base, {}).get(member)
         if gives is None:
-            return None, ""
+            return None, "", {}
         if gives == "@":
-            return self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+            return self._resolve_bound(carried, file_id, within, java) if carried else (None, "", {})
         if gives == base:
-            return owner, carried
-        return self._resolve_type(f"{gives}<{carried}>" if carried else gives, file_id, within, java)
+            return owner, carried, bindings
+        return self._resolve_bound(f"{gives}<{carried}>" if carried else gives, file_id, within, java)
+
+    def _callback_text(self, file_id: int, line: int, col: int, member: str) -> str:
+        if file_id not in self.callbacks:
+            self.callbacks[file_id] = {(r["line"], r["col"], r["name"]): r["callback"] for r in self.conn.execute(
+                "SELECT line, col, name, callback FROM code_refs WHERE file_id = ? AND callback != ''", (file_id,))}
+        return self.callbacks[file_id].get((line, col, member), "")
+
+    def _element_of(self, target: Target, carried: str, bindings: Dict[str, str], file_id: int, within: Optional[int],
+                    java: bool) -> Tuple[Target, str, Dict[str, str]]:
+        """The element or value a carrier holds: what a callback on it receives."""
+        if carried:
+            return self._resolve_bound(carried, file_id, within, java)
+        params = self._type_params_of(target)
+        if params and bindings.get(params[-1]):
+            return self._resolve_bound(bindings[params[-1]], file_id, within, java)
+        return None, "", {}
+
+    def _callback_parameter(self, spec: str, file_id: int, from_symbol: Optional[int], java: bool, depth: int) -> Tuple[Target, str, Dict[str, str]]:
+        """"<receiver chain>.<member>#<index>": the type the member hands its callback's parameter (ADR-024)."""
+        inner, _, index = spec.rpartition("#")
+        parts = _split_dots(inner)
+        if len(parts) < 2 or not index.isdigit():
+            return None, "", {}
+        member = parts[-1]
+        receiver = inner[:-len(member) - 1]
+        if member not in _CALLBACK_PARAMS or int(index) not in _CALLBACK_PARAMS[member]:
+            return None, "", {}
+        target, carried, bindings = self._follow_bound(receiver, file_id, from_symbol, java, depth + 1)
+        if target is None:
+            return None, "", {}
+        return self._element_of(target, carried, bindings, file_id, self._enclosing_type(from_symbol), java)
+
+    def _apply_callback(self, file_id: int, position: Tuple[int, int], member: str, result: Tuple[Target, str, Dict[str, str]],
+                        from_symbol: Optional[int], java: bool, depth: int) -> Tuple[Target, str, Dict[str, str]]:
+        """A call like map(o -> o.getCustomer()): its result carries what the lambda's body gives."""
+        text = self._callback_text(file_id, position[0], position[1], member)
+        target, carried, bindings = result
+        if not text or ":" not in text or target is None:
+            return result
+        mode, chain = text.split(":", 1)
+        body, body_carried, _ = self._follow_bound(chain, file_id, from_symbol, java, depth + 1)
+        if body is None:
+            return target, "", {}
+        within = self._enclosing_type(from_symbol)
+        if mode == "a" and isinstance(body, str) and body.split("#")[-1].split(".")[-1] in _WRAPPERS_UNWRAPPED and body_carried:
+            encoded = body_carried if body_carried.startswith("=") else self._encode(body_carried, file_id, within, java)
+        else:
+            encoded = self._encode_resolved(body, body_carried if body_carried.startswith("=") else self._encode(body_carried, file_id, within, java))
+        params = self._type_params_of(target)
+        return target, encoded, {params[0]: encoded} if params and encoded else {}
 
     def _follow(self, chain: str, file_id: int, from_symbol: Optional[int], java: bool) -> Tuple[Target, str]:
         """Follows a receiver chain from its base to the type the last step gives."""
+        target, carried, _ = self._follow_bound(chain, file_id, from_symbol, java)
+        return target, carried
+
+    def _follow_bound(self, chain: str, file_id: int, from_symbol: Optional[int], java: bool, depth: int = 0) -> Tuple[Target, str, Dict[str, str]]:
+        if depth > 6:
+            return None, "", {}
         base, steps = _chain_steps(chain)
         within = self._enclosing_type(from_symbol)
         current: Target = None
         carried = ""
+        bindings: Dict[str, str] = {}
         awaited = base.startswith("await ")
         if awaited:
             base = base[6:]
@@ -1715,50 +2061,73 @@ class _Linker:
             current = within
         elif base == "super":
             current = next(iter(self.supers.get(within, [])), None) if within is not None else None
-            if current is None and within is not None and len(self.external_supers.get(within, [])) == 1:
+            if current is not None:
+                bindings = self._super_bindings(within, current, {})
+            elif within is not None and len(self.external_supers.get(within, [])) == 1:
                 current = self.external_supers[within][0]
+                bindings = self._super_bindings(within, current, {})
         elif base.startswith("T:"):
-            current, carried = self._resolve_type(base[2:], file_id, within, java)
+            current, carried, bindings = self._resolve_bound(base[2:], file_id, within, java)
         elif base.startswith("new "):
-            current, carried = self._resolve_type(base[4:], file_id, within, java)
+            current, carried, bindings = self._resolve_bound(base[4:], file_id, within, java)
+        elif base.startswith("C:"):
+            current, carried, bindings = self._callback_parameter(base[2:], file_id, from_symbol, java, depth)
         elif base.startswith("N:"):
             name = base[2:]
             if java:
                 scope = within
                 while scope is not None and current is None:   # A field of the class, or of the classes around it
-                    field = self._method(scope, name.split(".")[0], -1, ("field",))
-                    if field is not None:
-                        current, carried = self._type_of(field)
+                    found = self._member_bound(scope, name.split(".")[0], -1, ("field",), {})
+                    if found is not None and found[0] == "symbol":
+                        current, carried, bindings = self._type_of_bound(found[1], found[2])
                         steps = name.split(".")[1:] + steps
                     scope = self._enclosing_type(self.symbols[scope]["parent_id"])
                 if current is None:
                     current = self._java_type(name, file_id, within)   # A static call on a type
             else:
-                found, module = self._binding(file_id, name)
-                if isinstance(found, int):
-                    current, carried = self._type_of(found) if self.symbols[found]["kind"] not in TYPE_KINDS else (found, "")
+                called, _, type_args, _ = _parse_step(name) if name.endswith(")") else (name, False, "", None)
+                found, module = self._binding(file_id, called)
+                outside = False
+                if isinstance(found, int):   # A variable's type, a function call's return type, or a type itself
+                    current, carried, bindings = self._type_of_bound(found, {}) if self.symbols[found]["kind"] not in TYPE_KINDS else (found, "", {})
                 elif isinstance(found, str):
-                    current = found
+                    current, outside = self._alias(found), True
                 elif module is not None:
                     current = self.default.get(module)
+                elif called in _GLOBALS and called not in self.top[file_id]:
+                    current, outside = f"#{called}", True
+                if name.endswith(")") and outside and isinstance(current, str):   # A library function (`request<T>(url)`, `fetch(url)`)
+                    package, _, function = current.rpartition("#")
+                    row = next((m for m in self.lib_members.get(package, {}).get(function, []) if m["kind"] == "function"), None)
+                    if row is not None:
+                        current, carried, bindings = self._lib_result(package, row, {}, type_args, file_id, within, False)
+                    elif not package and function in _GLOBAL_RETURNS:
+                        current, carried, bindings = self._resolve_bound(_GLOBAL_RETURNS[function], file_id, within, False)
+                    else:
+                        current, carried, bindings = None, "", {}
         if awaited and isinstance(current, str) and current.split("#")[-1] in ("Promise", "Observable"):
-            current, carried = self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+            current, carried, bindings = self._element_of(current, carried, bindings, file_id, within, java)
         for step in steps:
             if current is None:
-                return None, ""
-            member, call = (step[:-2], True) if step.endswith("()") else (step, False)
+                return None, "", {}
             if step == "[]":
-                current, carried = self._resolve_type(carried, file_id, within, java) if carried else (None, "")
+                current, carried, bindings = self._element_of(current, carried, bindings, file_id, within, java)
                 continue
+            member, call, type_args, position = _parse_step(step)
             if isinstance(current, int):
                 kinds = ("method", "function") if call else ("field", "variable", "method", "function")
-                found = self._method(current, member, -1, kinds)
+                found = self._member_bound(current, member, -1, kinds, bindings)
                 if found is None:
-                    return None, ""
-                current, carried = self._type_of(found)
+                    return None, "", {}
+                if found[0] == "symbol":
+                    current, carried, bindings = self._type_of_bound(found[1], found[2])
+                else:
+                    current, carried, bindings = self._lib_result(found[1], found[2], found[3], type_args, file_id, within, java)
             else:
-                current, carried = self._carrier_step(current, member, carried, file_id, within, java)
-        return current, carried
+                current, carried, bindings = self._carrier_step(current, member, carried, bindings, type_args, file_id, within, java)
+            if position is not None:
+                current, carried, bindings = self._apply_callback(file_id, position, member, (current, carried, bindings), from_symbol, java, depth)
+        return current, carried, bindings
 
     def _java_type(self, name: str, file_id: int, within: Optional[int]) -> Target:
         """Resolves a type name as javac would: enclosing types, imports, the package, then java.lang."""

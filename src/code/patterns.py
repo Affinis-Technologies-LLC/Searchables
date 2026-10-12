@@ -178,9 +178,9 @@ class _Miner:
         self.symbols = {row["id"]: row for row in self.conn.execute("SELECT * FROM code_symbols WHERE codebase_id = ?", (codebase_id,))}
         self.files = {row["id"]: row for row in self.conn.execute("SELECT * FROM code_files WHERE codebase_id = ?", (codebase_id,))}
         # Linked references with where they are
-        self.refs = self.conn.execute(
+        self.refs = self.conn.execute(   # Calls, constructions and type uses; member reads and writes (ADR-025) aren't patterns
             "SELECT r.*, f.path, s.qualified AS enclosing FROM code_refs r JOIN code_files f ON f.id = r.file_id "
-            "LEFT JOIN code_symbols s ON s.id = r.from_symbol WHERE r.codebase_id = ? AND r.target_id IS NOT NULL "
+            "LEFT JOIN code_symbols s ON s.id = r.from_symbol WHERE r.codebase_id = ? AND r.target_id IS NOT NULL AND r.kind != 'use' "
             "ORDER BY f.path, r.line, r.col", (codebase_id,)).fetchall()
         self.test_files = {fid for fid, f in self.files.items() if TEST_NAMES.search(f["path"])}
         self._owners: Dict[int, Optional[int]] = {}

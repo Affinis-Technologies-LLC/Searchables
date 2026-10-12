@@ -12,8 +12,8 @@ folder of documents and codebases you give it, and answers with passages and cod
   folder. The meaning model is downloaded once and used offline.
 - **Nothing of the codebase is run.** The code views read source files; they never build, test,
   format or execute anything. The only files written are the ones you save in the editor. The
-  one program the app starts is `git`, in the Code view's Git segment, for status, diff, log and
-  commit only; it never pushes.
+  one program the app starts is `git`, for status, diff, log, blame, show and commit only; it
+  never pushes, pulls or changes the working tree.
 
 ## The views
 

@@ -232,7 +232,7 @@ export interface Usage {
   text: string;
   from_symbol: number | null;
   from_name: string;
-  certainty: "resolved" | "supertype" | "name";
+  certainty: "resolved" | "supertype" | "rule" | "name";
   target_id: number | null;
   target: string;
 }
@@ -457,13 +457,21 @@ export interface EnumComparison {
 
 // ---- Traceability as mentions (ADR-014)
 
-export interface CodeMention { codebase_id: number; file_id: number; path: string; line: number; text: string; certainty: "exact" | "name"; symbol: string }
+export interface CodeMention { codebase_id: number; file_id: number; path: string; line: number; text: string; certainty: "exact" | "name"; symbol: string; changed: string }
 export interface FileIdentifier { identifier: string; line: number; certainty: "exact" | "name"; text: string }
 
 // ---- Git and rename (ADR-015)
 
 export interface GitInfo { repository: boolean; branch: string; entries: { path: string; status: string; old_path: string }[]; reason: string }
 export interface GitCommit { commit: string; author: string; date: string; message: string }
+export interface BlameLine { line: number; commit: string; author: string; date: string; summary: string; text: string; uncommitted: boolean }
+export interface GitShown { commit: string; author: string; date: string; message: string; files: { path: string; added: number; removed: number }[]; diff: string }
 export interface RenameEdit { key: string; file_id: number; path: string; line: number; col: number; text: string; certainty: string; selected: boolean; symbol: string }
-export interface RenamePreview { symbol: CodeSymbol; new_name: string; edits: RenameEdit[]; also: CodeSymbol[] }
-export interface RenameResult { files: CodeFile[]; skipped: { key: string; path: string; line: number; reason: string }[]; edits_applied: number }
+export interface RenameMention { key: string; file_id: number; path: string; line: number; col: number; text: string }
+export interface RenamePreview {
+  symbol: CodeSymbol; new_name: string; edits: RenameEdit[]; also: CodeSymbol[];
+  file_rename: [string, string] | null;   // The file renamed with a public Java class, when it's named after it
+  collision: CodeSymbol | null;           // An existing symbol the name would clash with: applying is refused
+  mentions: RenameMention[];              // Strings containing the old name: listed, never edited
+}
+export interface RenameResult { files: CodeFile[]; skipped: { key: string; path: string; line: number; reason: string }[]; edits_applied: number; renamed_file: string | null }

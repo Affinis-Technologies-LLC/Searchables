@@ -1,7 +1,8 @@
 # ADR-015: Git status, diff and commit; rename symbol with preview
 
 **Status:** accepted 2026-10-11 (agreed as part of the roadmap; the record for step 14, written
-before building it).
+before building it). Amended by ADR-025 (rename completeness) and ADR-026 (blame and history:
+the operations list gains `blame`, `log --follow`, `log -L` and `show`, all read-only).
 
 ## Context
 

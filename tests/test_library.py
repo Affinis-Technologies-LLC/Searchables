@@ -292,7 +292,7 @@ def test_code_scan_job(tmp_path):
     assert indexer.pending_codebases() == {codebase.id} and indexer.pending_doc_ids() == set()
     wait(indexer)
     assert job.status == DONE and "10 files" in job.result
-    assert CodeStore(factory().conn).get(codebase.id).symbol_count == 33
+    assert CodeStore(factory().conn).get(codebase.id).symbol_count == 34
 
 
 # ---- Evaluation harness ------------------------------------------------------------------------

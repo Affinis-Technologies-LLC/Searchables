@@ -146,7 +146,7 @@ def test_code_api(signed_in):
                            headers=WRITE).json()
     wait_for_jobs(client)
     base = f"/api/codebases/{codebase['id']}"
-    assert client.get("/api/state").json()["codebases"][0]["symbol_count"] == 33
+    assert client.get("/api/state").json()["codebases"][0]["symbol_count"] == 34
     assert len(client.get(base + "/files").json()) == 10
 
     fetch_user = next(s for s in client.get(base + "/symbols?q=fetchUser").json() if s["name"] == "fetchUser")
@@ -161,7 +161,7 @@ def test_code_api(signed_in):
     assert declared["declared"]["id"] == fetch_user["id"] and declared["ref"] is None
 
     file = client.get(f"/api/code/files/{fetch_user['file_id']}").json()
-    assert file["text"].startswith("import axios") and [s["name"] for s in file["outline"]][:2] == ["User", "fetchUser"]
+    assert file["text"].startswith("import axios") and [s["name"] for s in file["outline"]][:3] == ["User", "id", "fetchUser"]   # An interface's property is a field (ADR-024)
     audit = next(s for s in client.get(base + "/symbols?q=audit").json())
     calls = client.get(f"/api/code/symbols/{audit['id']}/calls?direction=callers").json()
     assert calls["tree"][0]["symbol"]["name"] == "save" and calls["tree"][0]["children"]
@@ -429,5 +429,30 @@ def test_git_and_rename_api(signed_in, tmp_path):
     assert len(preview["edits"]) == 4 and all(e["selected"] for e in preview["edits"])
     assert client.post(f"/api/code/symbols/{find['id']}/rename/preview", json={"name": "1bad"}, headers=WRITE).status_code == 400
     done = client.post(f"/api/code/symbols/{find['id']}/rename", json={"name": "lookup", "edits": [e["key"] for e in preview["edits"]]}, headers=WRITE).json()
-    assert done["edits_applied"] == 4 and done["skipped"] == []
+    assert done["edits_applied"] == 4 and done["skipped"] == [] and done["renamed_file"] is None
     assert "repository.lookup(" in (tmp_path / "shop/backend/src/main/java/com/shop/service/OrderService.java").read_text()
+    # Blame, history and show on a repository (ADR-026); off a repository they say so without failing
+    assert client.get(f"/api/codebases/{codebase['id']}/git/blame?path=README.md").json() == []
+    if shutil.which("git"):
+        git = shutil.which("git")
+        import subprocess
+        for args in (["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "start"]):
+            subprocess.run([git, *args], cwd=tmp_path / "shop", check=True)
+        path = "backend/src/main/java/com/shop/service/OrderService.java"
+        blame = client.get(f"/api/codebases/{codebase['id']}/git/blame?path={path}").json()
+        assert blame and all(b["commit"] and b["summary"] == "start" and not b["uncommitted"] for b in blame)
+        history = client.get(f"/api/codebases/{codebase['id']}/git/history?path={path}&start=1&end=3").json()
+        assert [h["message"] for h in history] == ["start"]
+        shown = client.get(f"/api/codebases/{codebase['id']}/git/show?commit={history[0]['commit']}&path={path}").json()
+        assert shown["message"] == "start" and any(f["path"] == path for f in shown["files"]) and shown["diff"].startswith("diff --git")
+        assert client.get(f"/api/codebases/{codebase['id']}/git/show?commit=HEAD").status_code == 400
+    # A class: imports and constructors are edits, the file goes with it, a collision is refused (ADR-025)
+    order = next(s for s in client.get(f"/api/codebases/{codebase['id']}/symbols?q=Order").json() if s["qualified"] == "com.shop.model.Order")
+    preview = client.post(f"/api/code/symbols/{order['id']}/rename/preview", json={"name": "Customer"}, headers=WRITE).json()
+    assert preview["collision"]["qualified"] == "com.shop.model.Customer"
+    assert client.post(f"/api/code/symbols/{order['id']}/rename", json={"name": "Customer", "edits": [e["key"] for e in preview["edits"]]}, headers=WRITE).status_code == 400
+    preview = client.post(f"/api/code/symbols/{order['id']}/rename/preview", json={"name": "Purchase"}, headers=WRITE).json()
+    assert preview["collision"] is None and preview["file_rename"] == ["backend/src/main/java/com/shop/model/Order.java", "backend/src/main/java/com/shop/model/Purchase.java"]
+    assert any(e["text"].strip() == "import com.shop.model.Order;" for e in preview["edits"]) and any(e["symbol"].endswith("Order#Order") for e in preview["edits"])
+    done = client.post(f"/api/code/symbols/{order['id']}/rename", json={"name": "Purchase", "edits": [e["key"] for e in preview["edits"] if e["selected"]], "rename_file": True}, headers=WRITE).json()
+    assert done["renamed_file"] == "backend/src/main/java/com/shop/model/Purchase.java" and (tmp_path / "shop" / done["renamed_file"]).exists()

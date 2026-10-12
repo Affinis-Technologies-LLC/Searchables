@@ -34,7 +34,7 @@ export function About({ onClose }: { onClose: () => void }) {
             <pre className="snippet about-lines">{lines.join("\n")}</pre>
             {stale && <div className="notice">The interface was built from version {__APP_VERSION__} but the server is {info.version}: rebuild the interface (cd web && npm run build) or pull the built one.</div>}
             <p className="muted">A local research tool for standards PDFs and source code. No AI: nothing is generated. Nothing leaves this
-              machine. Nothing of the codebase is run; git is the one program it starts, for status, diff and commit. See Help (F1) for what each view does.</p>
+              machine. Nothing of the codebase is run; git is the one program it starts, for status, diff, log, blame, show and commit. See Help (F1) for what each view does.</p>
             <details>
               <summary>Bundled software and licences</summary>
               <table className="about-table">

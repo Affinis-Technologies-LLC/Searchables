@@ -123,8 +123,8 @@ def complete_at(store: CodeStore, context: Context, limit: int = LIMIT) -> List[
 
     # In scope: the enclosing method's parameters and locals, then the enclosing type's members
     for name, declared in sorted(context.locals.items()):
-        add(Item(name, "variable", -1, f"{declared} {name}" if declared and not declared.startswith(("N:", "T:")) else name,
-                 declared[2:] if declared.startswith("T:") else declared if not declared.startswith("N:") else "", 0, "in scope"))
+        add(Item(name, "variable", -1, f"{declared} {name}" if declared and not declared.startswith(("N:", "T:", "C:")) else name,
+                 declared[2:] if declared.startswith("T:") else declared if not declared.startswith(("N:", "C:")) else "", 0, "in scope"))
     parsed = context.parsed
     type_index = _enclosing_type_index(parsed, context.enclosing_index)
     if type_index is not None:

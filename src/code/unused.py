@@ -53,6 +53,17 @@ def unused_in(store: CodeStore, codebase_id: int) -> Report:
     linked: Dict[int, int] = {}
     for target_id, n in conn.execute("SELECT target_id, COUNT(*) FROM code_refs WHERE codebase_id = ? AND target_id IS NOT NULL GROUP BY target_id", (codebase_id,)):
         linked[target_id] = n
+    # Links to a type's members from outside the type: a class whose fields only its own methods read is still unused (ADR-025)
+    linked_from_outside: Set[int] = set()
+    owner_of = {row["id"]: row["parent_id"] for row in rows}
+    for target_id, from_symbol in conn.execute(
+            "SELECT DISTINCT r.target_id, r.from_symbol FROM code_refs r WHERE r.codebase_id = ? AND r.target_id IS NOT NULL", (codebase_id,)):
+        owner = owner_of.get(target_id)
+        scope = from_symbol
+        while scope is not None and scope != owner:
+            scope = owner_of.get(scope)
+        if scope is None:
+            linked_from_outside.add(target_id)
     by_name: Dict[str, int] = {}
     for name, n in conn.execute("SELECT name, COUNT(*) FROM code_refs WHERE codebase_id = ? AND target_id IS NULL AND target IS NULL GROUP BY name", (codebase_id,)):
         by_name[name] = n
@@ -110,7 +121,7 @@ def unused_in(store: CodeStore, codebase_id: int) -> Report:
         elif row["kind"] in TYPE_KINDS and row["parent_id"] is None:
             if used(row) or TEST_NAMES.search(row["path"]) or row["id"] in annotated:
                 continue
-            members_used = any(linked.get(m["id"]) or m["id"] in reached_through_super for m in rows if m["parent_id"] == row["id"])
+            members_used = any(m["id"] in linked_from_outside or m["id"] in reached_through_super for m in rows if m["parent_id"] == row["id"])
             if members_used:
                 continue
             n = by_name.get(row["name"], 0)

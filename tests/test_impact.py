@@ -54,9 +54,10 @@ def test_by_name_edges_only_when_asked(shop):
     loose = impact_of(store, get_id, by_name=True)
     assert len(loose.nodes) >= len(linked.nodes) and loose.by_name_included
     assert all(n.certainty == "resolved" for n in linked.nodes)
-    # find's lambda `o -> o.getId()` is a by-name use: it appears only when asked, marked as such
-    assert any(n.qualified.endswith("OrderRepository#find") and n.certainty == "name" for n in loose.nodes)
-    assert not any(n.qualified.endswith("OrderRepository#find") for n in linked.nodes)
+    # find's lambda `o -> o.getId()` on a stream of orders resolves (ADR-024), so find is reached without asking;
+    # the by-name getId in OrderServiceTest (an untyped lambda in the test) appears only when asked, marked as such
+    assert any(n.qualified.endswith("OrderRepository#find") and n.certainty == "resolved" for n in linked.nodes)
+    assert [n.qualified for n in loose.nodes if n.certainty == "name"] == [n.qualified for n in loose.nodes if n.qualified not in {m.qualified for m in linked.nodes}]
 
 
 def test_bounds_are_reported(shop):

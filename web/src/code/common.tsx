@@ -26,7 +26,7 @@ export function UsageRows({ usages, showTarget = false }: { usages: Usage[]; sho
                 onClick={() => app.openCode({ fileId: usage.file_id, path: usage.path, line: usage.line })}>
           <span className="where">{shortPath(usage.path, 2)}:{usage.line}</span>
           <code>{usage.text.slice(0, 200)}</code>
-          {showTarget && usage.target && <small className="muted">→ {usage.target}</small>}
+          {showTarget && usage.target && <small className="muted">→ {usage.target}{usage.certainty === "rule" ? " · by rule" : ""}</small>}
         </button>
       ))}
       {usages.length > LISTED && <div className="muted">Showing the first {LISTED} of {usages.length}.</div>}

@@ -7,13 +7,14 @@ import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { CodeTab, useApp } from "../store";
-import { At, CompletionItem, ExamplesAnswer, Finding } from "../types";
+import { At, BlameLine, CompletionItem, ExamplesAnswer, Finding } from "../types";
 import { Status } from "../ui";
 import { assistant } from "./assistant";
 import { drafts } from "./drafts";
 import { saveFile } from "./editing";
 import { registerEditor } from "./editors";
 import { useFile } from "./files";
+import { BlameColumn, COMMIT_EVENT } from "./history";
 
 (self as unknown as { MonacoEnvironment: object }).MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
@@ -130,6 +131,17 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
   const conflict = drafts.conflict(tab.fileId);
   const [saving, setSaving] = useState(false);
   const [comparing, setComparing] = useState(false);
+  const [blaming, setBlaming] = useState(false);
+  const [blame, setBlame] = useState<BlameLine[] | null>(null);
+  const [mounted, setMounted] = useState<monaco.editor.IStandaloneCodeEditor | null>(null);
+  useEffect(() => {   // Blame of the file as on disk (ADR-026): fetched when switched on, again after a save
+    if (!blaming || !data) { setBlame(null); return; }
+    let current = true;
+    api.get<BlameLine[]>(`/codebases/${data.file.codebase_id}/git/blame?path=${encodeURIComponent(data.file.path)}`)
+      .then((lines) => { if (current) setBlame(lines); })
+      .catch(() => { if (current) setBlame([]); });
+    return () => { current = false; };
+  }, [blaming, data?.file.id, data?.file.sha256, app.filesVersion]);
   const fileId = data?.file.id;
 
   const save = async () => {
@@ -166,6 +178,7 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
       quickSuggestions: assisted ? { other: true, comments: false, strings: false } : false,
     });
     editor.current = instance;
+    setMounted(instance);
     marks.current = instance.createDecorationsCollection();
     const unregister = registerEditor(data.file.id, instance);
     // Convention checks on the saved file as information markers (ADR-021), with the rule's examples in the hover
@@ -292,6 +305,7 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
         {data && <span className="muted">{data.file.lines.toLocaleString()} lines · {data.file.language}
           {data.file.has_errors && " · has syntax the parser couldn't fully read"}</span>}
         <button type="button" disabled={!dirty || saving} onClick={save} title="Save (Ctrl/Cmd+S)">{saving ? "Saving…" : "Save"}</button>
+        <button type="button" className={blaming ? "current" : ""} onClick={() => setBlaming(!blaming)} title="Who last changed each line, from git (read-only)">Blame</button>
         <span className="muted hint"><kbd>F12</kbd> or <kbd>Ctrl</kbd>+click: go to definition · <kbd>Shift</kbd>+<kbd>F12</kbd>: usages</span>
       </div>
       {conflict && data && (
@@ -304,7 +318,13 @@ export function CodeView({ tab, visible }: { tab: CodeTab; visible: boolean }) {
       )}
       <Status loading={loading && !data} error={error} />
       {conflict && comparing && data && <Compare theirs={conflict.currentText} mine={drafts.text(tab.fileId) ?? ""} language={data.file.language} />}
-      <div className="code-host" ref={host} hidden={!!(conflict && comparing)} />
+      <div className="code-area" hidden={!!(conflict && comparing)}>
+        {blaming && mounted && blame && data && (
+          <BlameColumn editor={mounted} lines={blame} dirty={dirty}
+                       onCommit={(commit) => { actions.current.setInspectorView("History"); window.dispatchEvent(new CustomEvent(COMMIT_EVENT, { detail: { codebaseId: data.file.codebase_id, commit, path: data.file.path } })); }} />
+        )}
+        <div className="code-host" ref={host} />
+      </div>
     </div>
   );
 }

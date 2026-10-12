@@ -6,6 +6,7 @@ import { useApp } from "../store";
 import { Codebase, GitCommit, GitInfo } from "../types";
 import { Empty, shortPath, Status } from "../ui";
 import { drafts } from "./drafts";
+import { CommitPanel, DiffBlock } from "./history";
 
 const STATUS: Record<string, string> = { "??": "new", " M": "modified", "M ": "modified (staged)", "MM": "modified", "A ": "added", " D": "deleted", "D ": "deleted", "R ": "renamed", "AM": "added" };
 
@@ -18,6 +19,8 @@ export function GitView({ codebase }: { codebase: Codebase }) {
   const [showing, setShowing] = useState<string | null>(null);
   const diff = useLoad<{ diff: string }>(() => (showing ? api.get(`/codebases/${codebase.id}/git/diff?path=${encodeURIComponent(showing)}`) : null), [codebase.id, showing, version, app.filesVersion]);
   const [message, setMessage] = useState("");
+  const [opened, setOpened] = useState<string | null>(null);
+  const [openedPath, setOpenedPath] = useState<string | null>(null);
   const dirty = useSyncExternalStore((l) => drafts.subscribe(l), () => drafts.dirtyIds().join(","));
   const unsavedPaths = new Set(dirty.split(",").filter(Boolean).map((id) => drafts.get(Number(id))?.path));
   const toggle = (path: string) => setChosen((c) => { const next = new Set(c); if (!next.delete(path)) next.add(path); return next; });
@@ -57,13 +60,19 @@ export function GitView({ codebase }: { codebase: Codebase }) {
           <div className="group">
             <div className="group-title">Diff · {shortPath(showing, 2)}</div>
             <Status loading={diff.loading && !diff.data} error={diff.error} />
-            {diff.data && <pre className="snippet diff">{diff.data.diff.split("\n").map((l, i) => <div key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : ""}>{l}</div>)}</pre>}
+            {diff.data && <DiffBlock text={diff.data.diff} />}
           </div>
         )}
         {log.data && log.data.length > 0 && (
           <div className="group">
             <div className="group-title">Recent commits</div>
-            {log.data.map((c) => <div key={c.commit} className="muted"><code>{c.commit}</code> {c.date} · {c.message}</div>)}
+            {log.data.map((c) => (
+              <button key={c.commit} type="button" className={"code-row" + (c.commit === opened ? " current" : "")} title={c.message}
+                      onClick={() => { setOpened(c.commit === opened ? null : c.commit); setOpenedPath(null); }}>
+                <span className="where">{c.date}</span><span className="grow">{c.message}</span><small className="muted">{c.author} · <code>{c.commit}</code></small>
+              </button>
+            ))}
+            {opened && <CommitPanel codebaseId={codebase.id} commit={opened} path={openedPath ?? undefined} onPath={setOpenedPath} />}
           </div>
         )}
       </div>

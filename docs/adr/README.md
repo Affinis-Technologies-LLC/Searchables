@@ -30,5 +30,8 @@ to them or supersedes them knowingly.
 | [ADR-021](adr-021-convention-checks.md) | Convention checks from mined patterns, in a Checks segment and as editor markers (roadmap step 10, built) |
 | [ADR-022](adr-022-tables-as-data.md) | Tables as data: a standard's table as an enum, compared with the enum the code has (roadmap step 11, built) |
 | [ADR-023](adr-023-typescript-language-service.md) | A TypeScript language service: not built; added only if the measured by-name share on real code exceeds 25 %; `.d.ts` reading preferred first (roadmap step 12) |
+| [ADR-024](adr-024-closing-the-resolution-gap.md) | Closing the resolution gap: type arguments through supertypes, typed callbacks, Spring Data queries as a rule, `.d.ts` files as library symbols (roadmap step 15, built) |
+| [ADR-025](adr-025-rename-completeness.md) | Rename completeness, amending ADR-015: member accesses as references, imports, constructors and the file renamed with a class, collisions refused (roadmap step 16, built) |
+| [ADR-026](adr-026-git-blame-and-history.md) | Git blame and history, read-only, amending ADR-015: blame in the editor, a file's and a symbol's history, one commit shown, dates on a standard's code mentions (roadmap step 17, built) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

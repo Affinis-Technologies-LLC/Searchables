@@ -19,6 +19,9 @@ tests exist. The order is the one that keeps the index correct before anything i
 | 12 | **A TypeScript language service**, if the by-name share measured on the real Angular/React code is too high after step 1 | ADR-023 (accepted: a decision procedure) | by-name share before and after | **open on the measure**: built only above 25 % by name on the real codebases; reading `.d.ts` files of declared packages is the preferred first step |
 | 13 | **Traceability** between Catalogue identifiers and code, both ways | ADR-014 (accepted, built as mentions) | `tests/test_trace.py` — all pass | **built** in the narrow form: where an identifier's text appears in the code (exact) or a symbol is named after it (by name), and which identifiers a file mentions; no claim of implementation, per the doubt recorded on 2026-10-11 |
 | 14 | **Git status, diff and commit; rename symbol with preview** | ADR-015 (accepted, built) | `tests/test_git_and_rename.py` — all pass | **built**; Git segment; Rename… on a symbol |
+| 15 | **Closing the resolution gap**: type arguments bound through supertypes, callback parameters typed from the receiver, Spring Data derived queries as a rule, `.d.ts` files read as library symbols | ADR-024 (accepted, built) | `tests/test_resolution_gaps.py`: fifteen gap tests on `tests/codebase_generics`, and a no-regression test over the other fixtures' link tables | **built**: TypeScript by name 11 %/17 % → 0 % on the fixtures, Java 25 %/6 % → 19 %/2 % (12 %/0 % with the JDK); the real codebases still decide ADR-023 |
+| 16 | **Rename completeness**: member accesses as references (field usages for Usages, Impact, Unused too), imports, constructors and the Java file renamed with a class, collisions refused, string mentions listed | ADR-025 (accepted, built; amends ADR-015) | `tests/test_git_and_rename.py`: five gap tests; after a rename a rescan finds no by-name reference to the old name | **built**: references +36 % on the corpus, scan +2.6 % net (batched commits), re-link 0.05 s |
+| 17 | **Git blame and history** (read-only): blame column in the editor, a file's history with renames followed, a symbol's history by line range, one commit's files and diff, last-change dates on a standard's code mentions | ADR-026 (accepted, built; amends ADR-015) | `tests/test_git_and_rename.py`: blame marks an uncommitted line, history follows a rename, a method's history excludes another method's commit, non-hex commit ids refused, no write call beyond add and commit; API and browser tests | **built**: blame of a 2,265-line file 0.09 s |
 
 Alongside every step: front-end unit tests (Vitest) for the components the step adds (ADR-008 names
 their absence as a gap), and the ADR index updated.
@@ -26,7 +29,7 @@ their absence as a gap), and the ADR index updated.
 ## Decisions still open
 
 - A TypeScript language service: ADR-023 makes it a decision by measure (above 25 % by name on the real
-  Angular/React code, after reading `.d.ts` files has been tried).
+  Angular/React code). Reading `.d.ts` files is built (ADR-024); the number is still to be measured there.
 - Which real codebases (one Java, one Angular, one React) are used for measurement and the evaluation
   set, and who judges the examples.
 - Removal of the switched-off Streamlit interface.

@@ -76,7 +76,7 @@ def test_code_tab(app):
 
     run()
     assert not app.exception and app.title[0].value == "Code Search"
-    assert any("33 symbols" in c.value for c in app.caption)
+    assert any("34 symbols" in c.value for c in app.caption)
     run(app.text_input(key="code_query").set_value("fetchUser"))
     run(next(b for b in app.button if b.label == "Explore").click())
     assert not app.exception

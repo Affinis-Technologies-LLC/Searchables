@@ -11,6 +11,7 @@ import csv
 import dataclasses
 import io
 import json
+import subprocess
 import re
 import sqlite3
 import threading
@@ -620,8 +621,27 @@ def block_table(c: Call) -> dict:
 
 @api("GET", "/catalogue/code")
 def catalogue_code(c: Call) -> list:
-    """Where an identifier's text appears in the codebases (ADR-014): exact, or a symbol named after it."""
-    return plain(code_mentions(services.library, services.code, c.query.get("id", ""), c.ints("codebases") or None))
+    """Where an identifier's text appears in the codebases (ADR-014): exact, or a symbol named after it, with when the line last changed."""
+    mentions = code_mentions(services.library, services.code, c.query.get("id", ""), c.ints("codebases") or None)
+    return plain(_dated(mentions))
+
+
+def _dated(mentions: list) -> list:
+    """Each mention's line dated by git blame (ADR-026): one blame per file, at most twenty files, silently none without a repository."""
+    by_file: dict = {}
+    for m in mentions:
+        by_file.setdefault((m.codebase_id, m.path), []).append(m)
+    for (codebase_id, path), items in list(by_file.items())[:20]:
+        codebase = services.code.get(codebase_id)
+        if codebase is None:
+            continue
+        try:
+            dates = {b.line: b.date for b in git.blame(Path(codebase.root), path)}
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            continue
+        for m in items:
+            m.changed = dates.get(m.line, "")
+    return mentions
 
 
 @api("GET", "/code/files/{id:int}/identifiers")
@@ -1037,6 +1057,24 @@ def code_git_log(c: Call) -> list:
     return plain(git.log(Path(_codebase(c.path["id"]).root)))
 
 
+@api("GET", "/codebases/{id:int}/git/blame")
+def code_git_blame(c: Call) -> list:
+    """Who last changed each line of a file as it is on disk (ADR-026); uncommitted lines are marked."""
+    return plain(git.blame(Path(_codebase(c.path["id"]).root), c.query.get("path", ""), int(c.query.get("start", 0)), int(c.query.get("end", 0))))
+
+
+@api("GET", "/codebases/{id:int}/git/history")
+def code_git_history(c: Call) -> list:
+    """The commits that changed a file (renames followed), or a range of its lines: a symbol's history (ADR-026)."""
+    return plain(git.history(Path(_codebase(c.path["id"]).root), c.query.get("path", ""), int(c.query.get("start", 0)), int(c.query.get("end", 0))))
+
+
+@api("GET", "/codebases/{id:int}/git/show")
+def code_git_show(c: Call) -> dict:
+    """One commit: message, files changed, and its diff for a path when given (ADR-026)."""
+    return plain(git.show(Path(_codebase(c.path["id"]).root), c.query.get("commit", ""), c.query.get("path", "")))
+
+
 @api("POST", "/codebases/{id:int}/git/commit")
 def code_git_commit(c: Call) -> dict:
     codebase = _codebase(c.path["id"])
@@ -1061,7 +1099,7 @@ def code_rename(c: Call) -> dict:
     keys = c.data.get("edits") or []
     if not isinstance(keys, list) or not keys:
         raise ValueError("Choose the places to rename.")
-    return plain(apply_rename(services.code, symbol, str(c.data.get("name", "")), [str(k) for k in keys]))
+    return plain(apply_rename(services.code, symbol, str(c.data.get("name", "")), [str(k) for k in keys], rename_file=bool(c.data.get("rename_file"))))
 
 
 @api("GET", "/codebases/{id:int}/unused")

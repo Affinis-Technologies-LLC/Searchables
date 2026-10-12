@@ -59,6 +59,7 @@ class Symbol:
 # How sure a link from a reference to a symbol is
 RESOLVED = "resolved"       # Followed through imports, declared types or scope
 SUPERTYPE = "supertype"     # A call through a supertype's method that this one overrides or implements
+RULE = "rule"               # Linked to an outside API by a framework rule (ADR-024), not by a declaration the index read
 BY_NAME = "name"            # Only the name (and argument count) agree: what it's called on couldn't be told
 
 

@@ -148,7 +148,7 @@ function Entry({ value, scope, onFollow }: { value: string; scope: string; onFol
           <div className="group-title" title="Where this identifier's text appears in the code, or a symbol is named after it. A mention, not a claim that the code implements it.">In the code · {inCode.data.length}</div>
           {inCode.data.map((m, i) => (
             <button key={i} type="button" className="code-row usage" title={m.path} onClick={() => app.openCode({ fileId: m.file_id, path: m.path, line: m.line })}>
-              <span className="where">{shortPath(m.path, 2)}:{m.line}</span><code>{m.text}</code>{m.certainty === "name" && <span className="muted"> · by name</span>}
+              <span className="where">{shortPath(m.path, 2)}:{m.line}</span><code>{m.text}</code>{m.certainty === "name" && <span className="muted"> · by name</span>}{m.changed && <span className="muted" title="When this line last changed, from git"> · {m.changed}</span>}
             </button>
           ))}
         </section>

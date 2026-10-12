@@ -13,13 +13,14 @@ JDK = classfiles.jdk_home()
 needs_jdk = pytest.mark.skipif(JDK is None, reason="no JDK with jmods found on this machine (SEARCHABLES_JAVA_HOME)")
 
 
-def test_signature_parsing_tracks_the_first_type_variable():
+def test_signature_parsing_tracks_every_class_type_variable():
     assert classfiles._class_type_params("<T:Ljava/lang/Object;>Ljava/lang/Object;") == ["T"]
     assert classfiles._class_type_params("<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;") == ["K", "V"]
-    assert classfiles._signature_types("(Ljava/lang/Object;)TT;", ["T"]) == ("$T", "")
-    assert classfiles._signature_types("()Ljava/util/Optional<TT;>;", ["T"]) == ("java.util.Optional", "$T")
+    assert classfiles._signature_types("(Ljava/lang/Object;)TT;", ["T"]) == ("$T0", "")
+    assert classfiles._signature_types("()Ljava/util/Optional<TT;>;", ["T"]) == ("java.util.Optional", "$T0")
     assert classfiles._signature_types("()Ljava/util/List<Ljava/lang/String;>;", []) == ("java.util.List", "java.lang.String")
-    assert classfiles._signature_types("(Ljava/lang/Object;)TV;", ["K", "V"]) == ("", "")   # Only the first variable is followed
+    assert classfiles._signature_types("(Ljava/lang/Object;)TV;", ["K", "V"]) == ("$T1", "")   # Map.get gives V, the second variable (ADR-024)
+    assert classfiles._signature_types("(Ljava/util/function/Function<-TT;+TR;>;)Ljava/util/stream/Stream<TR;>;", ["T"]) == ("java.util.stream.Stream", "")   # A method's own variable
     assert classfiles._param_count("(ILjava/lang/String;[J)V") == 3 and classfiles._param_count("()V") == 0
 
 
@@ -32,9 +33,9 @@ def test_reads_the_public_api_of_core_classes():
         system = classfiles.read_class(archive.read("classes/java/lang/System.class"))
     assert optional.qualified == "java.util.Optional" and optional.type_params == ["T"] and optional.kind == "class"
     or_else = next(m for m in optional.members if m.name == "orElse")
-    assert (or_else.returns, or_else.carried, or_else.params) == ("$T", "", 1)
+    assert (or_else.returns, or_else.carried, or_else.params) == ("$T0", "", 1)
     find_first = next(m for m in stream.members if m.name == "findFirst")
-    assert (find_first.returns, find_first.carried) == ("java.util.Optional", "$T")
+    assert (find_first.returns, find_first.carried) == ("java.util.Optional", "$T0")
     out = next(m for m in system.members if m.name == "out")
     assert (out.kind, out.returns, out.static) == ("field", "java.io.PrintStream", True)
     assert not any(m.name == "<clinit>" for m in system.members) and all(m.name for m in system.members)

@@ -129,11 +129,16 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     if panel.get_by_role("button", name="Add a codebase").count():    # Another test in this run has added one already
         panel.get_by_role("button", name="Add a codebase").click()
     shutil.copytree(Path(__file__).parent / "codebase", tmp_path / "project")   # Its own copy: a folder is listed once
+    git = shutil.which("git")
+    if git:   # A repository, so Blame has something to show (ADR-026)
+        import subprocess
+        for args in (["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "start"]):
+            subprocess.run([git, *args], cwd=tmp_path / "project", check=True)
     panel.get_by_placeholder("C:\\Projects").fill(str(tmp_path / "project"))
     panel.get_by_placeholder("Defaults to the folder's name").fill(f"Browser {time.time():.0f}")
     panel.get_by_role("button", name="Add and scan").click()
     page.wait_for_selector("text=/Browser \\d+/", state="attached")
-    expect(panel.locator(".panel-head").first).to_contain_text("33 symbols", timeout=60000)
+    expect(panel.locator(".panel-head").first).to_contain_text("34 symbols", timeout=60000)
     page.get_by_label("Search the code").fill("fetchUser")
     panel.locator(".card", has_text="fetchUser").first.click()
     page.wait_for_selector(".editor-pane:not([hidden]) .monaco-editor .view-line")
@@ -174,6 +179,13 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     page.get_by_role("button", name="Take the version on disk").click()
     expect(page.locator(".tab.on .unsaved")).to_have_count(0)
     expect(page.locator(".editor-pane:not([hidden]) .view-line", has_text="changed outside")).to_be_visible()
+    if git:   # Blame: the committed lines carry a date, the edited ones are marked uncommitted; History lists the commit
+        page.locator(".viewer .toolbar").get_by_role("button", name="Blame").click()
+        expect(page.locator(".blame-column .blame-line.uncommitted").first).to_be_visible()
+        assert "20" in page.locator(".blame-column .blame-line:not(.uncommitted):not(.same)").first.inner_text()
+        page.locator(".viewer .toolbar").get_by_role("button", name="Blame").click()
+        page.locator(".inspector .segments button", has_text="History").click()
+        expect(page.locator(".inspector .code-row", has_text="start")).to_be_visible()
 
     # Examples as you type: a call on axios shows the codebase's other axios calls; completion lists what's known
     editor.locator(".view-lines").click()

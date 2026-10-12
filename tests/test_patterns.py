@@ -73,8 +73,9 @@ def test_entry_points_and_layers(shop):
 
 def test_hotspots(shop):
     _, p = shop
-    assert [(h.qualified, h.references) for h in p.hot_symbols[:3]] == [("Http#get", 4), ("com.shop.repo.OrderRepository#find", 3), ("com.shop.service.Audit#record", 3)]
-    assert [(f.path.rsplit("/", 1)[-1], f.references) for f in p.hot_files[:2]] == [("Order.java", 17), ("OrderRepository.java", 11)]   # Types, calls and constructions from other files
+    assert [(h.qualified, h.references) for h in p.hot_symbols[:4]] == [("Http#get", 4), ("com.shop.model.Order#getId", 3), ("com.shop.repo.OrderRepository#find", 3),
+                                                                        ("com.shop.service.Audit#record", 3)]   # getId: place, validate, and find's lambda (ADR-024)
+    assert [(f.path.rsplit("/", 1)[-1], f.references) for f in p.hot_files[:2]] == [("Order.java", 18), ("OrderRepository.java", 11)]   # Types, calls and constructions from other files
 
 
 def test_conventions(shop):

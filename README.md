@@ -161,10 +161,16 @@ Add the top folder of the source (a path on the machine the app runs on); it's s
 background, where it is. **Rescan** reads only new and changed files.
 
 **Git and rename.** The Code panel's **Git** segment shows the branch, the changed files, each
-file's diff, and commits with a message; `git` is the one program the app starts, for status, diff,
-log and commit only, never push. **Rename…** on a symbol previews every place the name would change,
-with its certainty, and changes only the places you tick; methods that override one another are
-renamed together.
+file's diff, and commits with a message; a **Blame** column in the editor and a **History** view in
+the inspector (a file's commits with renames followed, or a symbol's own) read from the repository,
+and a Catalogue identifier's code mentions carry the date their line last changed; `git` is the one
+program the app starts, for status, diff, log, blame, show and commit only, never push. **Rename…** on a symbol previews every place the name would change,
+with its certainty, and changes only the places you tick: references, field reads and writes,
+template bindings, import lines, a Java class's constructors, and the file when it's named after a
+public class; methods that override one another are renamed together. A name that already exists
+on the type, in the file or in the package is refused with the clash named; strings containing the
+old name are listed as mentions, never edited. Member accesses (`this.x`, `order.status`) are
+references in the index, so a field's **Usages**, **Impact** and **Unused** are real.
 
 **Change impact, unused code, changes, checks.** The inspector's **Impact** view lists everything
 that reaches a symbol through calls, by layer, with the routes and tests among them. The Code
@@ -179,7 +185,18 @@ are in the local Maven or Gradle cache, straight from the class files: no JVM, n
 nothing downloaded. Calls through library types then resolve (`users.stream().filter(…)`,
 `System.out.println`) and completion on a library type lists its members. The JDK is found through
 `SEARCHABLES_JAVA_HOME`, `JAVA_HOME` or the usual install folders; the caches through
-`SEARCHABLES_MAVEN_REPO` and `SEARCHABLES_GRADLE_CACHE`.
+`SEARCHABLES_MAVEN_REPO` and `SEARCHABLES_GRADLE_CACHE`. On TypeScript and JavaScript codebases the
+`.d.ts` files of the packages `package.json` declares are read the same way from `node_modules`
+(with TypeScript's own `lib.*.d.ts` for the built-ins and the browser, when the `typescript`
+package is installed), so `this.http.get<User>(url).subscribe(user => …)` types `user`.
+
+**Resolution without a compiler.** Type arguments are bound through supertypes (`OrderRepository
+extends JpaRepository<Order, Long>` makes `findById` an `Optional<Order>`), every type variable of a
+library class is tracked (`Map<K, V>.get` gives the `V`), and the parameters of callbacks are typed
+from what they're called on (`orders.forEach(o -> …)`, `users.map(u => u.id)`, `.then(r => …)`,
+`.subscribe(x => …)`), with `map`'s result typed from the lambda's body. Members a framework provides
+without a declaration (Spring Data's CRUD methods, when the jar isn't on disk) come from a rule and
+are labelled **by rule**. `python -m src.evaluate_code <folder>` reports what's left by name.
 
 **Patterns.** The Code panel's **Patterns** segment shows what's usual in a codebase, counted from
 the index: idioms per type (what's called on it, in what order), how types are obtained, calls that
@@ -283,7 +300,7 @@ code the folders skipped, the largest file read, and how deep call trees go.
 |---|---|---|
 | `SEARCHABLES_DATA_DIR` | `data/` in the project | Where the library is kept |
 | `SEARCHABLES_MODEL_DIR` | `models/` in the project | Where the meaning-search model is kept |
-| `SEARCHABLES_JAVA_HOME`, `SEARCHABLES_MAVEN_REPO`, `SEARCHABLES_GRADLE_CACHE` | `JAVA_HOME` or the usual folders; `~/.m2/repository`; `~/.gradle/caches/modules-2/files-2.1` | Where Java library class files are read from; `SEARCHABLES_LIBRARIES=0` switches that off |
+| `SEARCHABLES_JAVA_HOME`, `SEARCHABLES_MAVEN_REPO`, `SEARCHABLES_GRADLE_CACHE` | `JAVA_HOME` or the usual folders; `~/.m2/repository`; `~/.gradle/caches/modules-2/files-2.1` | Where Java library class files are read from; `SEARCHABLES_LIBRARIES=0` leaves the JDK unread (declared jars and the `node_modules` packages beside a codebase are still read) |
 
 ## Checking search quality
 

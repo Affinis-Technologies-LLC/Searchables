@@ -126,7 +126,9 @@ def test_java_usages_follow_types_overloads_and_supertypes(store, code):
     assert "UserController.java:19" in where(store.usages(user), RESOLVED)
     constructor = find(store, code, "com.acme.model.User#User")
     assert where(store.usages(constructor)) == ["UserController.java:20"]
-    assert where(store.usages(find(store, code, "com.acme.model.User#getId")), BY_NAME) == ["UserService.java:13"]
+    get_id = find(store, code, "com.acme.model.User#getId")
+    assert "UserService.java:13" in where(store.usages(get_id), RESOLVED)   # u -> u.getId() on a stream of users (ADR-024)
+    assert where(store.usages(get_id), BY_NAME) == []
 
 
 def test_script_usages_follow_imports_aliases_and_require(store, code):

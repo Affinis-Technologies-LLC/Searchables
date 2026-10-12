@@ -54,6 +54,8 @@ Searchables/
 │   │   ├── complete.py         # Completion from the index
 │   │   ├── patterns.py         # The Patterns view: what's usual in a codebase, counted from the index (ADR-013)
 │   │   ├── classfiles.py       # Java library symbols read from class files in the JDK and local jars, no JVM (ADR-017)
+│   │   ├── declarations.py     # TypeScript library symbols read from packages' .d.ts files and TypeScript's lib (ADR-024)
+│   │   ├── frameworks.py       # Framework rules: members a framework provides without a declaration, labelled "by rule" (ADR-024)
 │   │   ├── impact.py           # Change impact: the closure over callers by layer, with routes and tests (ADR-018)
 │   │   ├── unused.py           # Dead and unreachable code, with certainty (ADR-019)
 │   │   ├── signatures.py       # Signature-aware search over the stored types (ADR-019)
@@ -93,4 +95,6 @@ Searchables/
 │       ├── __init__.py
 │       └── formatting.py       # Highlighting, HTML sanitization, export
 └── tests/                      # pytest: rules, extraction, search, vectors, indexing, the code index, editing, examples (with a judged set), the API, and the app in a browser
-    └── codebase/               # A small Java + TypeScript/JavaScript project the code tests index
+    ├── codebase/               # A small Java + TypeScript/JavaScript project the code tests index
+    ├── codebase_generics/      # Generics, callbacks, a framework repository and .d.ts packages (ADR-024's gap tests)
+    └── baseline/               # The other fixtures' link tables before ADR-024: links may only be added, never change target

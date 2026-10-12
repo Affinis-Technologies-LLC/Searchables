@@ -8,8 +8,9 @@ import { CallTree, SymbolHead, SymbolLink, UsageRows } from "./common";
 import { ExamplesPanel } from "./ExamplesPanel";
 import { RenameDialog } from "./RenameDialog";
 import { loadFile, useFile } from "./files";
+import { HistoryView } from "./history";
 
-const VIEWS = ["Examples", "Usages", "Calls", "Impact", "Hierarchy", "Members", "File"] as const;
+const VIEWS = ["Examples", "Usages", "Calls", "Impact", "Hierarchy", "Members", "History", "File"] as const;
 const CERTAINTY: [Usage["certainty"], string, string][] = [
   ["resolved", "Linked", "Followed through imports, declared types or scope."],
   ["supertype", "Through a supertype", "Calls made through an interface or superclass method that this one implements or overrides."],
@@ -36,6 +37,7 @@ export function CodeInspector({ tab }: { tab: CodeTab }) {
           <div className="symbol-head">
             <header><span className="card-title">{loose.ref!.name}</span></header>
             <div className="card-path">{loose.ref!.target ? `Outside API: ${loose.ref!.target}` : "Couldn't be linked for certain"}</div>
+            {loose.ref!.certainty === "rule" && <div className="muted">By a framework rule: the framework provides this member without a declaration the index can read.</div>}
           </div>
         ) : symbol ? (
           <div className="symbol-head">
@@ -60,8 +62,9 @@ export function CodeInspector({ tab }: { tab: CodeTab }) {
         <Status loading={detail.loading && !detail.data} error={detail.error} />
         {loose && file.data && <Loose codebaseId={file.data.file.codebase_id} target={loose.ref!.target} candidates={loose.candidates} />}
         {!loose && view === "File" && <FileView tab={tab} />}
+        {!loose && view === "History" && <HistoryView tab={tab} symbol={symbol} />}
         {!loose && view === "Examples" && <ExamplesPanel />}
-        {!loose && view !== "File" && view !== "Examples" && !symbol && !detail.loading && (
+        {!loose && view !== "File" && view !== "History" && view !== "Examples" && !symbol && !detail.loading && (
           <Empty>Put the cursor on a name in the source, or pick a symbol from the search or the file's outline, to see
             where it's used, what calls it and what it calls.</Empty>
         )}

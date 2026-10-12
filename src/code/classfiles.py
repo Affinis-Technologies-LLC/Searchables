@@ -24,8 +24,8 @@ class MemberInfo:
     name: str
     kind: str                   # method, constructor, field
     params: int
-    returns: str                # Erased class name ("java.util.Optional"), "" for void/primitive, "$T" for the class's first type variable
-    carried: str                # The first type argument of the return type: a class, "$T", or ""
+    returns: str                # Erased class name ("java.util.Optional"), "" for void/primitive, "$T0", "$T1"… for the class's type variables
+    carried: str                # The first type argument of the return type: a class, "$T<i>", or ""
     static: bool
     signature: str              # Readable: "Optional<T> findFirst()" / "PrintStream out"
 
@@ -69,16 +69,15 @@ def _param_count(descriptor: str) -> int:
 
 def _signature_types(signature: str, type_params: Sequence[str]) -> Tuple[str, str]:
     """
-    (returns, carried) from a generic signature's return part: "TT;" → ("$T", ""); "Ljava/util/Optional<TT;>;" →
-    ("java.util.Optional", "$T"); "Ljava/util/List<Ljava/lang/String;>;" → ("java.util.List", "java.lang.String").
-    Only the class's first type variable is tracked as "$T".
+    (returns, carried) from a generic signature's return part: "TT;" → ("$T0", ""); "Ljava/util/Optional<TT;>;" →
+    ("java.util.Optional", "$T0"); "Ljava/util/List<Ljava/lang/String;>;" → ("java.util.List", "java.lang.String").
+    A class's type variables are "$T0", "$T1", … by position (ADR-024); a method's own are "" (unknown).
     """
     returns = signature[signature.index(")") + 1:] if ")" in signature else signature
-    first = type_params[0] if type_params else None
 
     def one(text: str) -> str:
         if text.startswith("T") and text.endswith(";"):
-            return "$T" if text[1:-1] == first else ""
+            return f"$T{type_params.index(text[1:-1])}" if text[1:-1] in type_params else ""
         if text.startswith("L"):
             body = text[1:text.index("<")] if "<" in text else text[1:-1]
             return _dotted(body)
@@ -231,15 +230,21 @@ def _read_class(data: bytes) -> Optional[ClassInfo]:
             if name == "<init>":
                 info.members.append(MemberInfo(simple, "constructor", params, qualified, "", False, f"{simple}({params} args)"))
             else:
-                shown = (returns.rsplit(".", 1)[-1] if returns and returns != "$T" else info.type_params[0] if returns == "$T" else
+                shown = (_variable(returns, info.type_params) if returns.startswith("$T") else returns.rsplit(".", 1)[-1] if returns else
                          _primitive(returns_descriptor))
                 info.members.append(MemberInfo(name, "method", params, returns, carried, bool(flags & ACC_STATIC),
                                                f"{shown} {name}({params} args)".strip()))
         else:
             returns, carried = (_signature_types(signature_text, info.type_params) if signature_text else (_class_of_descriptor(descriptor), ""))
-            shown = returns.rsplit(".", 1)[-1] if returns and returns != "$T" else info.type_params[0] if returns == "$T" else _primitive(descriptor)
+            shown = _variable(returns, info.type_params) if returns.startswith("$T") else returns.rsplit(".", 1)[-1] if returns else _primitive(descriptor)
             info.members.append(MemberInfo(name, "field", -1, returns, carried, bool(flags & ACC_STATIC), f"{shown} {name}".strip()))
     return info
+
+
+def _variable(text: str, type_params: Sequence[str]) -> str:
+    """The name of the class's type variable "$T<i>" stands for."""
+    index = int(text[2:] or 0)
+    return type_params[index] if index < len(type_params) else "?"
 
 
 _PRIMITIVES = {"V": "void", "I": "int", "J": "long", "Z": "boolean", "D": "double", "F": "float", "B": "byte", "C": "char", "S": "short"}
