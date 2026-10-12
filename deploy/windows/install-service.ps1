@@ -73,8 +73,8 @@ if (-not (Test-Administrator)) {
 
 # ---- Locate the app ------------------------------------------------------------------------
 $AppDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-if (-not (Test-Path (Join-Path $AppDir "app.py"))) {
-    throw "app.py not found in $AppDir. Run this script from deploy\windows inside the project."
+if (-not (Test-Path (Join-Path $AppDir "src\server\__main__.py"))) {
+    throw "src\server\__main__.py not found in $AppDir. Run this script from deploy\windows inside the project."
 }
 if ($ServiceAccount -ne "LocalSystem" -and $AppDir.StartsWith($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase)) {
     Write-Warning ("The project is inside your user profile ($AppDir). The $ServiceAccount account can't read " +

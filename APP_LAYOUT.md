@@ -10,7 +10,6 @@ Searchables/
 │       ├── help/               # Help inside the app: the pages (from docs/help), the Markdown reader, the panel and view
 │       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library
 │       └── code/               # Code panel (search and replace, files, dependencies, APIs), editor with saving (drafts.ts, editing.ts), inspector, Examples view (assistant.ts)
-├── .streamlit/, app.py         # The earlier Streamlit interface (with src/ui/), kept until the new one has been tried
 ├── VERSION                     # The app's version; a release is a bump, a commit and a tag (ADR-016)
 ├── docs/                       # ADRs (docs/adr), the roadmap, and the help pages bundled into the app (docs/help)
 ├── README.md                   # Overview, setup, meaning-search model, data and configuration
@@ -87,7 +86,6 @@ Searchables/
 │   │   ├── compare.py          # Edition comparison: clause pairing, word diffs, provision changes
 │   │   ├── export.py           # Collection → Markdown / Word with citations
 │   │   └── glossary.py         # Defined terms from "Terms and definitions" clauses; acronym lists and their use in searches
-│   ├── ui/                     # The earlier Streamlit interface's screens (see app.py)
 │   ├── viewer/
 │   │   ├── __init__.py
 │   │   └── render.py           # Page images with search hits highlighted; figure crops

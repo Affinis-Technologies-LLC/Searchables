@@ -1,6 +1,6 @@
 # ADR-007: A local API server and a prebuilt browser front end
 
-**Status:** accepted (supersedes the Streamlit interface, which is switched off and to be removed)
+**Status:** accepted (supersedes the Streamlit interface, removed by ADR-027)
 
 ## Context
 

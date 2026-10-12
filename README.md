@@ -330,10 +330,6 @@ npm run dev            # A reloading copy on http://localhost:5173, using the se
 npm run build          # Type-checks, then rebuilds src/server/static
 ```
 
-The earlier Streamlit interface (`app.py`, `src/ui/`) is still in the repository but switched off:
-started the old way, it only says how to start the new one. It runs with `SEARCHABLES_STREAMLIT=1`
-set, until it's removed.
-
 ## Tests
 
 ```bash

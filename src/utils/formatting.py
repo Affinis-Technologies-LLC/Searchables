@@ -1,8 +1,6 @@
 import re
 import html
-import pandas as pd
 from typing import List
-from src.models import SearchResult
 
 def highlight_values(text: str, values) -> str:
     """Escapes text and marks exact occurrences of `values` (identifiers as written), longest first."""
@@ -24,19 +22,3 @@ def marked_to_html(marked: str, start: str, end: str) -> str:
     """Escapes text whose hits are wrapped in start/end marker characters, then turns markers into <mark>."""
     escaped = html.escape(marked)
     return escaped.replace(start, '<mark class="query-hit">').replace(end, "</mark>")
-
-def results_to_dataframe(results: List[SearchResult]) -> pd.DataFrame:
-    """Converts search results into a clean tabular format for CSV export."""
-    data = [
-        {
-            "Rank": r.rank,
-            "Document": r.doc_title,
-            "Clause": r.block.clause,
-            "Page": r.block.display_page,
-            "Score": round(r.score, 3),
-            "Text": r.block.text,
-            "Citation": r.citation,
-        }
-        for r in results
-    ]
-    return pd.DataFrame(data)
