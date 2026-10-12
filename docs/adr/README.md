@@ -33,7 +33,7 @@ to them or supersedes them knowingly.
 | [ADR-024](adr-024-closing-the-resolution-gap.md) | Closing the resolution gap: type arguments through supertypes, typed callbacks, Spring Data queries as a rule, `.d.ts` files as library symbols (roadmap step 15, built) |
 | [ADR-025](adr-025-rename-completeness.md) | Rename completeness, amending ADR-015: member accesses as references, imports, constructors and the file renamed with a class, collisions refused (roadmap step 16, built) |
 | [ADR-026](adr-026-git-blame-and-history.md) | Git blame and history, read-only, amending ADR-015: blame in the editor, a file's and a symbol's history, one commit shown, dates on a standard's code mentions (roadmap step 17, built) |
-| [ADR-027](adr-027-streamlit-removal.md) | Removing the switched-off Streamlit interface and its dependencies, completing ADR-007 (roadmap step 18, proposed) |
+| [ADR-027](adr-027-streamlit-removal.md) | Removing the switched-off Streamlit interface and its dependencies, completing ADR-007 (roadmap step 18, done) |
 | [ADR-028](adr-028-portable-release.md) | Distribution as a portable release: embeddable Python, locked wheels, the app, the model and the scripts in one zip, built from a tag (roadmap step 19, proposed) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

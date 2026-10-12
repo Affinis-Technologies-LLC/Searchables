@@ -1,7 +1,7 @@
 # ADR-027: Removing the switched-off Streamlit interface
 
-**Status:** proposed 2026-10-11 (draft for agreement; nothing removed). Roadmap step 18. Completes
-ADR-007, which superseded Streamlit and kept it "until the new one has been tried".
+**Status:** accepted 2026-10-11; done the same day (roadmap step 18). Completes ADR-007, which
+superseded Streamlit and kept it "until the new one has been tried".
 
 ## Context
 
@@ -48,3 +48,24 @@ and has had no feature since. It still costs:
 - `tests/test_app.py` goes; its assertions (33 → 34 symbols and the like) already live in
   `test_server.py` and `test_browser.py`.
 - ADR-028's package is smaller by the same amount.
+
+## As done
+
+- Removed: `app.py`, `src/ui/` (twelve modules), `.streamlit/config.toml`, `tests/test_app.py`,
+  `results_to_dataframe` and the `pandas` import in `src/utils/formatting.py` (its two remaining
+  functions serve the server and the library). `requirements.txt` drops `streamlit` and `pandas`;
+  `requirements.lock` regenerated with the same `uv pip compile` command as before: 98 → 75
+  packages, and **no remaining package changed version** (checked by diffing the two locks: only
+  removals — streamlit, pandas, pyarrow, altair, pydeck, protobuf, watchdog, tornado's companions
+  and the rest of Streamlit's tree). `install-service.ps1` checks for `src\server\__main__.py`.
+- `tests/test_one_interface.py`: the guard (nothing under `src/`, `tests/` or the root imports
+  `streamlit` or `pandas`) and the removal itself (the files are gone, the requirements don't name
+  them). Written first; it listed the twelve `src/ui` modules before the deletion.
+- README, `APP_LAYOUT.md` and ADR-007's status updated. ADR-001 to ADR-006 stay as written.
+
+### Measures
+
+- A fresh environment from the new lock: **1.3 GB** against 1.6 GB (the whole of the 280 MB
+  estimated); `pip list` shows none of the three packages.
+- The full suite from that environment, browser test included: **190 passed** (192 before, minus
+  `test_app.py`'s tests, plus the two guards).
