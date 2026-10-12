@@ -4,10 +4,19 @@ The scripts in this folder install Searchables as a Windows service that starts 
 restarts itself if it crashes, and writes rotating logs. They use [WinSW](https://github.com/winsw/winsw),
 a small open-source service wrapper, to run the app's server.
 
+## From a release
+
+A release (`Searchables-<version>-win64.zip`) brings its own Python, packages, model and WinSW: unzip it
+to a folder outside your user profile (`C:\Apps\Searchables-<version>`) and the scripts below work as
+described, except that nothing is created, installed or downloaded — "Before you start" shrinks to
+Tesseract and git, both optional. To upgrade, unzip the new version beside the old one, run
+`install-service.ps1` from the new folder (it re-points the service), then delete the old folder; the
+library in `C:\ProgramData\Searchables` is untouched.
+
 ## Just want to try it?
 
-`run.ps1` starts the app in a PowerShell window without installing a service (Ctrl+C stops it). It sets
-up `.venv` on first use and keeps the library in the project's `data` folder:
+`run.ps1` starts the app in a PowerShell window without installing a service (Ctrl+C stops it). From a
+checkout it sets up `.venv` on first use; it keeps the library in the project's `data` folder:
 
 ```powershell
 cd C:\Apps\Searchables\deploy\windows

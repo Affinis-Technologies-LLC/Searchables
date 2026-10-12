@@ -20,6 +20,7 @@ Searchables/
 ├── data/                       # Library: stored PDFs, SQLite index, collections, password hash (git-ignored)
 ├── models/                     # Downloaded meaning-search model (git-ignored)
 ├── deploy/
+│   ├── build-release.py        # Builds the portable releases: own Python, locked packages, app, model, scripts (ADR-028)
 │   ├── macos/
 │   │   ├── run.sh                  # Run in a terminal (sets up .venv on first use)
 │   │   ├── install-service.sh      # Background service (launchd LaunchAgent): starts at login

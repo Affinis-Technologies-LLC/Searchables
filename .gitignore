@@ -180,3 +180,4 @@ deploy/windows/*.xml
 # Local embedding models (downloaded once; large)
 models/
 /web/node_modules/
+dist/

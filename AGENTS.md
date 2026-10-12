@@ -18,7 +18,8 @@ SQLite library and code index; a prebuilt React front end (`web/`, built into `s
    failures; a changed behaviour ships with a test that would have caught the old one.
    Run `.venv/bin/python -m pytest` (needs `requirements-dev.txt`); the browser test needs Chrome.
    Front-end unit tests: `cd web && npm test` (also run by `npm run build`).
-   A release is a bump of `VERSION`, a commit and a tag of the same number (ADR-016); a change to a view
+   A release is a bump of `VERSION`, a commit, a tag of the same number, and the archives built from
+   that tag with `python deploy/build-release.py --target all` (ADR-016, ADR-028); a change to a view
    is reviewed against its help page in `docs/help/`.
 4. **Keep to the recorded constraints**: everything local and offline (ADR-002); no LLM, nothing
    generated; rules that can be explained (ADR-003); additive schema changes (ADR-004); every code

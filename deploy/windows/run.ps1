@@ -26,6 +26,19 @@ Set-StrictMode -Version Latest
 function Write-Step([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 
 $AppDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+# A portable release (ADR-028) brings its own Python, packages and model: nothing to create, install or download
+$BundledPython = Join-Path $AppDir "python\python.exe"
+$Bundled = Test-Path $BundledPython
+if ($Bundled) {
+    Write-Step "Using the bundled Python"
+    $VenvPython = $BundledPython
+    if (Test-Path (Join-Path $AppDir "models")) { $env:SEARCHABLES_MODEL_DIR = Join-Path $AppDir "models" }
+    Push-Location $AppDir
+    try {
+        & $VenvPython -m src.server --check
+        if ($LASTEXITCODE -ne 0) { throw "The app can't start (see above)." }
+    } finally { Pop-Location }
+} else {
 $VenvPython = Join-Path $AppDir ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $VenvPython)) {
@@ -69,6 +82,7 @@ try {
         Write-Warning "The meaning-search model couldn't be downloaded (no internet?). Search still works by words."
     }
 } finally { Pop-Location }
+}
 
 # Tesseract for scanned pages: an existing TESSDATA_PREFIX, or the standard install location
 if (-not $env:TESSDATA_PREFIX) {

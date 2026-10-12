@@ -10,7 +10,17 @@ Two ways to run it:
 Both keep the library in the project's `data` folder by default, so they share the same documents,
 collections and search history. Run only one at a time on the same port.
 
-## Before you start
+## From a release
+
+A release (`Searchables-<version>-macos-arm64.tar.gz` for Apple silicon, `…-macos-x86_64.tar.gz` for
+Intel) brings its own Python, packages and model: unpack it (`tar -xzf`, or double-click) into
+`~/Apps/`, and the scripts below work as described with nothing to install or download. The bundled
+Python isn't signed or notarized, so a download through a browser carries macOS's quarantine attribute;
+`run.sh` and `install-service.sh` clear it on the release's own folder the first time (`xattr -dr
+com.apple.quarantine`) and say so. To upgrade, unpack the new version beside the old one, run
+`install-service.sh` from the new folder, then delete the old one; the library stays.
+
+## Before you start (from a checkout)
 
 - **Python 3.10 or newer.** The `python3` that comes with macOS is 3.9, which is too old. Install a newer
   one with [Homebrew](https://brew.sh) (`brew install python@3.12`) or from [python.org](https://www.python.org/downloads/macos/).

@@ -23,13 +23,15 @@ tests exist. The order is the one that keeps the index correct before anything i
 | 16 | **Rename completeness**: member accesses as references (field usages for Usages, Impact, Unused too), imports, constructors and the Java file renamed with a class, collisions refused, string mentions listed | ADR-025 (accepted, built; amends ADR-015) | `tests/test_git_and_rename.py`: five gap tests; after a rename a rescan finds no by-name reference to the old name | **built**: references +36 % on the corpus, scan +2.6 % net (batched commits), re-link 0.05 s |
 | 17 | **Git blame and history** (read-only): blame column in the editor, a file's history with renames followed, a symbol's history by line range, one commit's files and diff, last-change dates on a standard's code mentions | ADR-026 (accepted, built; amends ADR-015) | `tests/test_git_and_rename.py`: blame marks an uncommitted line, history follows a rename, a method's history excludes another method's commit, non-hex commit ids refused, no write call beyond add and commit; API and browser tests | **built**: blame of a 2,265-line file 0.09 s |
 | 18 | **Streamlit removal**: `app.py`, `src/ui/`, `.streamlit/`, `tests/test_app.py`, `pandas`; one interface | ADR-027 (accepted, done; completes ADR-007) | `tests/test_one_interface.py`: a guard that nothing imports streamlit or pandas, and that the files are gone; the suite from a fresh environment (190 passed) | **done**: 98 → 75 packages, 1.6 GB → 1.3 GB, no other version changed |
-| 19 | **Portable release**: `Searchables-<version>-win64.zip` with embeddable Python, the locked Windows wheels, the app, the model and the scripts; built from a tag by `deploy/build-release.py` | ADR-028 (proposed, extends ADR-016) | zip size; a clean Windows VM with no Python and no network: run, add a PDF, search with meaning, scan a codebase, install the service, reboot, upgrade beside the old folder | **proposed**; step 18 is done |
+| 19 | **Portable release**: one archive per target (win64, macos-arm64, macos-x86_64) with its own Python, the locked wheels, the app, the model and the scripts; built by `deploy/build-release.py` | ADR-028 (accepted, built; extends ADR-016) | `tests/test_release.py`; the Intel macOS archive run offline on this Mac with its own runtime (52 server and library tests pass) | **built**: win64 621 MB, macos-arm64 449 MB, macos-x86_64 548 MB; the Windows VM run and the service installs are still to be done by hand |
 
 Alongside every step: front-end unit tests (Vitest) for the components the step adds (ADR-008 names
 their absence as a gap), and the ADR index updated.
 
 ## Decisions still open
 
+- ADR-028's hand measure: the win64 archive on a clean Windows VM (no Python, no network), the service
+  install on both platforms, and an upgrade beside an older folder.
 - A TypeScript language service: ADR-023 makes it a decision by measure (above 25 % by name on the real
   Angular/React code). Reading `.d.ts` files is built (ADR-024); the number is still to be measured there.
 - Which real codebases (one Java, one Angular, one React) are used for measurement and the evaluation

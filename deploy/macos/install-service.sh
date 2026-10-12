@@ -65,6 +65,8 @@ mkdir -p "$HOME/Library/LaunchAgents"
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
 TESS_ENV=""
 [ -n "$TESSDATA" ] && TESS_ENV="        <key>TESSDATA_PREFIX</key><string>$(xml_escape "$TESSDATA")</string>"
+MODEL_ENV=""
+[ -n "${SEARCHABLES_MODEL_DIR:-}" ] && MODEL_ENV="        <key>SEARCHABLES_MODEL_DIR</key><string>$(xml_escape "$SEARCHABLES_MODEL_DIR")</string>"
 
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -85,6 +87,7 @@ cat > "$PLIST" <<PLIST
         <key>SEARCHABLES_DATA_DIR</key><string>$(xml_escape "$DATA_DIR")</string>
         <key>PYTHONUNBUFFERED</key><string>1</string>
 $TESS_ENV
+$MODEL_ENV
     </dict>
     <key>RunAtLoad</key><true/>
     <!-- Always restart; uninstall-service.sh unloads the service to stop it for good -->

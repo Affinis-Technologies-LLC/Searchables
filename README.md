@@ -100,6 +100,18 @@ setting. The address bar keeps the document, page and search in view, so a place
 
 ## Getting started
 
+**From a release (nothing to install).** Each release is a portable archive per machine type —
+`Searchables-<version>-win64.zip`, `Searchables-<version>-macos-arm64.tar.gz` (Apple silicon),
+`Searchables-<version>-macos-x86_64.tar.gz` (Intel) — holding its own Python, every package, the
+app and the meaning-search model (ADR-028). Unpack it anywhere outside your user profile and run
+`deploy\windows\run.ps1` or `deploy/macos/run.sh`; the install scripts beside them set up the
+service. No Python, no internet, no build on the machine. `RELEASE.md` in the folder says what
+was bundled; `LICENCES.md` lists the licences. A new release unpacked beside the old one takes
+over the library when its install script is run. Building one: `python deploy/build-release.py`
+(network needed on the building machine only; the archives land in `dist/`).
+
+**From a checkout** (developers; needs Python 3.10+ and, on first run, the internet):
+
 **macOS**
 
 ```bash

@@ -85,6 +85,19 @@ if ($ServiceAccount -ne "LocalSystem" -and $AppDir.StartsWith($env:USERPROFILE, 
 Write-Step "Project: $AppDir"
 
 # ---- Python environment --------------------------------------------------------------------
+# A portable release (ADR-028) brings its own Python, packages and model: nothing to create, install or download
+$BundledPython = Join-Path $AppDir "python\python.exe"
+$Bundled = Test-Path $BundledPython
+if ($Bundled) {
+    Write-Step "Using the bundled Python"
+    $VenvPython = $BundledPython
+    if (Test-Path (Join-Path $AppDir "models")) { $env:SEARCHABLES_MODEL_DIR = Join-Path $AppDir "models" }
+    Push-Location $AppDir
+    try {
+        & $VenvPython -m src.server --check
+        if ($LASTEXITCODE -ne 0) { throw "The app can't start (see above)." }
+    } finally { Pop-Location }
+} else {
 $VenvPython = Join-Path $AppDir ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
     Write-Step "Creating Python environment in .venv"
@@ -127,6 +140,7 @@ try {
                        "run this script again when online, then use 'Add meaning search' in the Library tab.")
     }
 } finally { Pop-Location }
+}
 
 # ---- Data folder and permissions -----------------------------------------------------------
 Write-Step "Data folder: $DataDir"
@@ -171,8 +185,11 @@ if ($Existing) {
     Start-Sleep -Seconds 2
 }
 
+$BundledWinSW = Join-Path $PSScriptRoot "WinSW-x64.exe"
 if ($WinSWPath) {
     Copy-Item -Path $WinSWPath -Destination $Wrapper -Force
+} elseif (-not (Test-Path $Wrapper) -and (Test-Path $BundledWinSW)) {
+    Copy-Item -Path $BundledWinSW -Destination $Wrapper -Force   # A portable release brings it (ADR-028)
 } elseif (-not (Test-Path $Wrapper)) {
     Write-Step "Downloading WinSW $WinSWVersion from GitHub"
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -189,6 +206,7 @@ $EnvLines = @(
     "    <env name=`"PYTHONUNBUFFERED`" value=`"1`" />"
 )
 if ($TessdataDir) { $EnvLines += "    <env name=`"TESSDATA_PREFIX`" value=`"$(Get-XmlSafe $TessdataDir)`" />" }
+if ($env:SEARCHABLES_MODEL_DIR) { $EnvLines += "    <env name=`"SEARCHABLES_MODEL_DIR`" value=`"$(Get-XmlSafe $env:SEARCHABLES_MODEL_DIR)`" />" }
 
 $DisplayName = if ($ServiceName -eq "Searchables") { "Searchables" } else { "Searchables ($ServiceName)" }
 $Xml = @"

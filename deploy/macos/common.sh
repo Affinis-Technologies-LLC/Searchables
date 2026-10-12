@@ -2,6 +2,7 @@
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENV_PYTHON="$APP_DIR/.venv/bin/python"
+BUNDLED_PYTHON="$APP_DIR/python/bin/python3"   # A portable release (ADR-028) brings its own Python, packages and model
 
 step() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWarning: %s\033[0m\n' "$*" >&2; }
@@ -23,6 +24,19 @@ find_python() {
 
 # Creates .venv if needed and installs the locked requirements when they've changed since the last install.
 ensure_environment() {
+    if [ -x "$BUNDLED_PYTHON" ]; then
+        VENV_PYTHON="$BUNDLED_PYTHON"
+        step "Using the bundled Python"
+        # Downloaded through a browser, the folder carries the quarantine attribute and Gatekeeper would refuse the
+        # unsigned interpreter and libraries; it is cleared on the release's own folder only
+        if xattr -p com.apple.quarantine "$BUNDLED_PYTHON" >/dev/null 2>&1; then
+            step "Clearing the quarantine attribute on the release folder (unsigned bundle, see deploy/macos/README.md)"
+            xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+        fi
+        [ -d "$APP_DIR/models" ] && export SEARCHABLES_MODEL_DIR="$APP_DIR/models"
+        (cd "$APP_DIR" && "$VENV_PYTHON" -m src.server --check) || die "The app can't start (see above)."
+        return 0
+    fi
     if [ ! -x "$VENV_PYTHON" ]; then
         local python
         python="$(find_python)" || die "Python 3.10 or newer not found. Install it with 'brew install python@3.12' \
