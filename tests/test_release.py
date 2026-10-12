@@ -53,3 +53,19 @@ def test_the_scripts_know_a_bundle():
     assert 'python\\python.exe' in (ROOT / "deploy/windows/run.ps1").read_text() and 'python\\python.exe' in (ROOT / "deploy/windows/install-service.ps1").read_text()
     assert "python/bin/python3" in (ROOT / "deploy/macos/common.sh").read_text() and "com.apple.quarantine" in (ROOT / "deploy/macos/common.sh").read_text()
     assert "WinSW-x64.exe" in (ROOT / "deploy/windows/install-service.ps1").read_text()
+
+
+def test_pymupdf_s_agpl_terms_are_named_in_the_licence_table():
+    """ADR-029: the one copyleft component is shown as such, in this environment and in any bundle built here."""
+    import sysconfig
+    places = [Path(sysconfig.get_paths()["purelib"])]
+    places += [p for p in (ROOT / "dist" / "build").glob("Searchables-*/python/*/site-packages")]
+    places += [p for p in (ROOT / "dist" / "build").glob("Searchables-*/python/lib/python*/site-packages")]
+    assert places
+    for site in places:
+        entries = {e["name"].lower(): e for e in build_release.licence_entries(site)}
+        assert "pymupdf" in entries, f"PyMuPDF not installed in {site}"
+        licence = entries["pymupdf"]["licence"]
+        assert ("AGPL" in licence.upper() or "AFFERO" in licence.upper()) and "artifex" in licence.lower(), f"{site}: {licence!r}"
+        others = [name for name, e in entries.items() if name != "pymupdf" and "GPL" in e["licence"].upper() and "LGPL" not in e["licence"].upper()]
+        assert others == [], f"other copyleft components in {site}: {others}"   # A new one would reopen ADR-029

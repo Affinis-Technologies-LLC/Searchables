@@ -35,5 +35,6 @@ to them or supersedes them knowingly.
 | [ADR-026](adr-026-git-blame-and-history.md) | Git blame and history, read-only, amending ADR-015: blame in the editor, a file's and a symbol's history, one commit shown, dates on a standard's code mentions (roadmap step 17, built) |
 | [ADR-027](adr-027-streamlit-removal.md) | Removing the switched-off Streamlit interface and its dependencies, completing ADR-007 (roadmap step 18, done) |
 | [ADR-028](adr-028-portable-release.md) | Distribution as a portable release: embeddable Python, locked wheels, the app, the model and the scripts in one zip, built from a tag (roadmap step 19, built) |
+| [ADR-029](adr-029-licensing.md) | Licensing: the project's own code MIT; PyMuPDF's AGPL governs a distributed copy, met by the public repository; releases given, not sold; what would reopen it (accepted) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).
