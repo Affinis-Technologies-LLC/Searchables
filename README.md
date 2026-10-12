@@ -372,5 +372,8 @@ See [APP_LAYOUT.md](APP_LAYOUT.md) for what each module does.
   that version (with numpy 1.x) there, and current versions elsewhere.
 - **Appendices numbered in tens:** older military-standard appendices number their sections 10, 20, 30… in every
   appendix, so a reference such as "see 10.1" can't say which appendix it means; it opens the first.
-- **Licence:** this project builds on [PyMuPDF](https://pymupdf.readthedocs.io/), which is licensed
-  under the AGPL 3.0 or a commercial licence from Artifex. Choose this project's licence accordingly.
+- **Licence:** Searchables' own code is under the MIT licence (`LICENSE`). It builds on
+  [PyMuPDF](https://pymupdf.readthedocs.io/), which is licensed under the AGPL 3.0 or a commercial
+  licence from Artifex: a release archive bundles PyMuPDF, so distributing one is subject to the AGPL's
+  terms (the source is this public repository) unless a commercial PyMuPDF licence is held. Every
+  bundled component's licence is listed in the archive's `LICENCES.md` and under About in the app.
