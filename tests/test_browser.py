@@ -245,3 +245,66 @@ def test_research_a_document_and_browse_code(page, standard_pdf, tmp_path):
     page.get_by_role("button", name="Account").click()
     page.get_by_role("button", name="Sign out").click()
     page.wait_for_selector("text=Sign in")
+
+
+def test_a_word_table_as_a_record(page, tmp_path):
+    """ADR-030: a field-layout table in the inspector's Tables view offers the record, and the record reads right."""
+    from tests.conftest import MESSAGE_FOOTERS, make_pdf, message_standard
+    page.get_by_label("Password", exact=True).fill(PASSWORD)
+    page.get_by_label("Confirm password").fill(PASSWORD)
+    page.get_by_role("button", name="Create password and continue").click()
+    page.wait_for_selector(".activity-bar")
+    pdf = tmp_path / "XYZ-STD-9999A.pdf"
+    pdf.write_bytes(make_pdf(message_standard(), header="XYZ-STD-9999", footers=MESSAGE_FOOTERS))
+    page.locator(".activity-bar button", has_text="Library").click()
+    page.set_input_files("input[type=file]", str(pdf))
+    page.wait_for_selector("text=Added XYZ-STD-9999A", timeout=120000)
+
+    page.locator(".activity-bar button", has_text="Search").click()
+    page.get_by_text("Scope", exact=True).click()   # The library may hold the other test's document too
+    page.locator(".doc-list label", has_text="XYZ-STD-9999A").click()
+    box = page.get_by_label("Search the library")
+    box.fill("M3.2 message shall be transmitted")
+    box.press("Enter")
+    page.wait_for_selector(".side-pane:not([hidden]) .card.selected")
+    expect(page.locator(".page-input")).to_have_value("2")
+    page.locator(".inspector .segments button", has_text="Tables").click()
+    page.wait_for_selector(".inspector table.data")
+    card = page.locator(".inspector .card", has_text="TABLE 5.1-1").first
+    expect(card.get_by_text("A field layout in bits:")).to_be_visible()
+    card.get_by_role("button", name="As Java record").click()
+    expect(card.locator("pre.snippet")).to_contain_text("public record M32IInitialWord(int referenceNumber, int strength)")
+    expect(card.locator("pre.snippet")).to_contain_text("STRENGTH_OFFSET = 19, STRENGTH_BITS = 4;")
+    expect(card.get_by_text("2 fields · 23 bits")).to_be_visible()
+    card.get_by_role("button", name="As TypeScript interface").click()
+    expect(card.locator("pre.snippet")).to_contain_text("export interface M32IInitialWord { referenceNumber: number; strength: number }")
+
+
+def test_fix_a_pdf_s_links(page, tmp_path):
+    """ADR-031: the Links view checks a dropped PDF, shows the link on its page, and offers the fixed file."""
+    from tests.test_links import broken_pdf
+    page.get_by_label("Password", exact=True).fill(PASSWORD)
+    page.get_by_label("Confirm password").fill(PASSWORD)
+    page.get_by_role("button", name="Create password and continue").click()
+    page.wait_for_selector(".activity-bar")
+    pdf = tmp_path / "XYZ-STD-9999A.pdf"
+    pdf.write_bytes(broken_pdf())
+    documents_before = page.locator(".status-bar").inner_text().split("·")[0].strip()   # "N documents": the library may hold the other tests' files
+    page.locator(".activity-bar button", has_text="Links").click()
+    page.locator(".side-pane:not([hidden]) input[type=file]").set_input_files(str(pdf))
+    page.wait_for_selector("text=1 dead")
+    panel = page.locator(".side-pane:not([hidden])")
+    expect(panel.get_by_text("1 wrong page")).to_be_visible()
+    expect(panel.get_by_text("2 of 2 link fixes and 2 bookmark fixes will be applied.")).to_be_visible()
+    expect(page.locator(".tab.on")).to_have_text("Links · XYZ-STD-9999A.pdf")
+    expect(page.locator(".links-outline")).to_be_visible()                                  # The first fixable link, outlined on page 2
+    expect(page.locator(".links-page .toolbar")).to_contain_text("Page 2 of 3")
+    panel.get_by_label("Fix link 1").uncheck()
+    expect(panel.get_by_text("1 of 2 link fixes and 2 bookmark fixes will be applied.")).to_be_visible()
+    href = panel.get_by_role("link", name="Download fixed PDF").get_attribute("href")
+    assert href and "skip=1" in href and "add=1" not in href and "outline=1" not in href
+    expect(panel.get_by_text("Headings without a bookmark · 2")).to_be_visible()             # ADR-032
+    panel.get_by_label("Rebuild the bookmarks from the 6 headings (replaces the 5 existing)").check()
+    assert "outline=1" in (panel.get_by_role("link", name="Download fixed PDF").get_attribute("href") or "")
+    assert len(page.locator(".side-pane:not([hidden]) .row.line").all()) >= 12               # 5 links, 5 bookmarks, 2 headings
+    assert page.locator(".status-bar").inner_text().split("·")[0].strip() == documents_before   # Not added to the library

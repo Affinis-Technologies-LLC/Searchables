@@ -257,3 +257,45 @@ def find_page_labels(pages: Iterable[Tuple[int, float, List[tuple]]]) -> Dict[in
     }
     best = max(labels.values(), key=len)
     return best if len(best) >= config.REPEAT_FRACTION * count else {}
+
+
+# ---- Bookmarks against the headings (ADR-032) ---------------------------------------------------
+
+@dataclass
+class OutlineMatch:
+    """One bookmark against the headings: the heading it names (by text, else by clause number), if any."""
+    index: int                      # Position in the outline
+    level: int
+    title: str
+    page: Optional[int]             # Where the bookmark points (1-based), None when its destination is gone
+    heading: Optional[object]       # The matched heading block (a TextBlock), or None
+    by_number: bool = False         # Matched by clause number alone: the title differs from the heading's text
+
+
+def match_outline(toc: List[tuple], headings: List[object]) -> Tuple[List[OutlineMatch], List[object]]:
+    """
+    (each bookmark matched to a heading, the headings no bookmark names). `toc` entries are
+    (level, title, page or None); `headings` are heading blocks with `text`, `clause`, `clause_num`
+    and `page`. The same matching serves the Links view's audit and the Library's health row.
+    """
+    by_text: Dict[str, object] = {}
+    by_number: Dict[str, object] = {}
+    for block in headings:
+        by_text.setdefault(normalize(block.text), block)
+        if block.clause:
+            by_text.setdefault(normalize(block.clause), block)
+        if block.clause_num:
+            by_number.setdefault(block.clause_num, block)
+    matches, named = [], set()
+    for index, (level, title, page) in enumerate(toc, start=1):
+        clean = " ".join(title.split())
+        heading = by_text.get(normalize(clean))
+        numbered = False
+        if heading is None:
+            num, _ = _split_heading_text(clean)
+            heading = by_number.get(num) if num else None
+            numbered = heading is not None
+        if heading is not None:
+            named.add(id(heading))
+        matches.append(OutlineMatch(index, level, clean, page, heading, numbered))
+    return matches, [block for block in headings if id(block) not in named]

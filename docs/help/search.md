@@ -34,6 +34,14 @@ In the inspector's **Tables** view, a table can be rendered **as a Java enum** o
 file, and **compared with an enum** of a codebase: which rows the enum has, which it's missing, which
 constants it has that the table doesn't, and values that differ.
 
+A table whose rows are fields with a width — bits, bytes or octets, with or without a start
+column or a `0–18` range — is a **field layout**, and the card also offers it **as a Java record**
+or **as a TypeScript interface** with the offset and width of every field and the total, offsets
+taken from the table when it gives them and otherwise counted from 0 in row order. Gaps, overlaps
+and a Total row that doesn't add up are said above the code. **Compare with type…** sets the
+layout's fields against a class, record or interface of a codebase, and where the code declares
+constants named `FIELD_BITS` or `FIELD_OFFSET`, their values against the table's.
+
 ## Results
 
 A result shows the passage, its document, clause and page. **Open** shows it on the page, with the

@@ -448,7 +448,16 @@ export interface Finding { kind: string; symbol: CodeSymbol; file_id: number; pa
 
 // ---- Tables as data (ADR-022)
 
-export interface TableAsCode { name: string; language: string; text: string; constants: string[]; columns: string[]; classes: string[] }
+export interface TableAsCode {
+  name: string; language: string; text: string; constants: string[]; columns: string[]; classes: string[];
+  shape: "enum" | "layout"; fields: LayoutField[]; unit: string; total: number; notes: string[];   // ADR-030
+}
+export interface LayoutField { name: string; property: string; constant: string; offset: number; width: number; code: string }
+export interface TypeComparison {
+  type: CodeSymbol; matched: string[]; missing_in_code: string[]; extra_in_code: string[];
+  extra: { name: string; symbol_id: number; line: number }[];
+  differences: { field: string; what: string; table: number; code: number }[]; not_stated: string[]; by_name_only: boolean;
+}
 export interface EnumComparison {
   enum: CodeSymbol; matched: string[]; missing_in_code: string[]; extra_in_code: string[];
   extra: { name: string; symbol_id: number; line: number }[]; value_mismatches: [string, string][];
@@ -475,3 +484,19 @@ export interface RenamePreview {
   mentions: RenameMention[];              // Strings containing the old name: listed, never edited
 }
 export interface RenameResult { files: CodeFile[]; skipped: { key: string; path: string; line: number; reason: string }[]; edits_applied: number; renamed_file: string | null }
+
+// ---- Fixing a PDF's dead links (ADR-031)
+
+export type LinkState = "ok" | "dead" | "wrong page" | "unresolved" | "external";
+export interface ReportLink {
+  id: number; page: number; rect: BBox; text: string; kind: "goto" | "named" | "uri" | "other"; target: string; state: LinkState;
+  reference: string; proposed_page: number | null; proposed_point: [number, number] | null; page_size: [number, number];
+}
+export type BookmarkState = LinkState | "unchecked";
+export interface ReportBookmark { id: number; level: number; title: string; page: number | null; state: BookmarkState; proposed_page: number | null; proposed_title: string | null }
+export interface ReportUnbookmarked { page: number; title: string; level: number }
+export interface ReportUnlinked { page: number; rect: BBox; reference: string; target_page: number }
+export interface LinkReport {
+  token: string; filename: string; page_count: number; refused: string;
+  links: ReportLink[]; bookmarks: ReportBookmark[]; unbookmarked: ReportUnbookmarked[]; unlinked: ReportUnlinked[]; counts: Partial<Record<LinkState, number>>;
+}

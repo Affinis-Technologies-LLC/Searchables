@@ -36,5 +36,8 @@ to them or supersedes them knowingly.
 | [ADR-027](adr-027-streamlit-removal.md) | Removing the switched-off Streamlit interface and its dependencies, completing ADR-007 (roadmap step 18, done) |
 | [ADR-028](adr-028-portable-release.md) | Distribution as a portable release: embeddable Python, locked wheels, the app, the model and the scripts in one zip, built from a tag (roadmap step 19, built) |
 | [ADR-029](adr-029-licensing.md) | Licensing: the project's own code MIT; PyMuPDF's AGPL governs a distributed copy, met by the public repository; releases given, not sold; what would reopen it (accepted) |
+| [ADR-030](adr-030-field-layouts-as-code.md) | Field layouts as code, amending ADR-022: a table with a width column as a Java record or a TypeScript interface with offsets and widths, compared with the type the code has (roadmap step 20, built) |
+| [ADR-031](adr-031-fixing-dead-links.md) | Fixing a PDF's dead links: a Links view that checks every internal link and bookmark at the raw object level, re-points the dead and mis-pointed ones by the document's own structure, and downloads the fixed file; refuses signed, locked and encrypted files (roadmap step 21, built) |
+| [ADR-032](adr-032-bookmarks.md) | Bookmarks audited like links (wrong page, retitled, unchecked), the outline rebuilt from the headings on request, and a Bookmarks row in the Library's health report; amends ADR-031 (roadmap step 22, built) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

@@ -8,7 +8,7 @@ Searchables/
 │       ├── api.ts, types.ts    # Calls to the server and the shapes it returns
 │       ├── shell/              # Sign-in page, activity bar, tab bar, status bar, About
 │       ├── help/               # Help inside the app: the pages (from docs/help), the Markdown reader, the panel and view
-│       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library
+│       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library, links (dead-link fixing)
 │       └── code/               # Code panel (search and replace, files, dependencies, APIs), editor with saving (drafts.ts, editing.ts), inspector, Examples view (assistant.ts)
 ├── VERSION                     # The app's version; a release is a bump, a commit and a tag (ADR-016)
 ├── docs/                       # ADRs (docs/adr), the roadmap, and the help pages bundled into the app (docs/help)
@@ -80,7 +80,8 @@ Searchables/
 │   │   └── query.py            # User query → safe FTS5 query (phrases, OR, NOT, prefix; all or some of the words)
 │   ├── research/
 │   │   ├── __init__.py
-│   │   ├── tables_as_code.py   # A table as an enum or TypeScript constants, compared with the code's enum (ADR-022)
+│   │   ├── tables_as_code.py   # A table as an enum or TypeScript constants, or a field layout as a record/interface, compared with the code (ADR-022, ADR-030)
+│   │   ├── links.py            # A PDF's dead links and bookmarks found at the raw object level and re-pointed by the document's own structure (ADR-031)
 │   │   ├── trace.py            # Catalogue identifiers ↔ code, as labelled mentions (ADR-014)
 │   │   ├── assess.py           # Same-topic assessment rules: values, shall/should/may, negation, identifiers
 │   │   ├── collections.py      # Collections of pins (self-contained copies of passages/tables)

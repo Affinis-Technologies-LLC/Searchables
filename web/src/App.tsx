@@ -6,6 +6,7 @@ import { CodePanel } from "./code/CodePanel";
 import { CodeView } from "./code/CodeView";
 import { HelpPanel } from "./help/HelpPanel";
 import { HelpView } from "./help/HelpView";
+import { LinksPanel, LinksPageView } from "./documents/LinksPanel";
 import { CataloguePanel } from "./documents/CataloguePanel";
 import { CollectionsPanel } from "./documents/CollectionsPanel";
 import { ComparePanel } from "./documents/ComparePanel";
@@ -71,7 +72,7 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
   const panels = {
     search: <SearchPanel />, contents: <ContentsPanel />, catalogue: <CataloguePanel />, glossary: <GlossaryPanel />,
     compare: <ComparePanel />,
-    collections: <CollectionsPanel />, library: <LibraryPanel />, code: <CodePanel />, help: <HelpPanel />,
+    collections: <CollectionsPanel />, library: <LibraryPanel />, code: <CodePanel />, links: <LinksPanel />, help: <HelpPanel />,
   };
   const side = Object.entries(panels).map(([name, panel]) => (
     <div key={name} className="side-pane" hidden={name !== activity}>
@@ -105,6 +106,7 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
                 <div key={tab.id} className="editor-pane" hidden={tab.id !== active?.id}>
                   {tab.kind === "doc" ? <PdfView tab={tab} visible={tab.id === active?.id} />
                    : tab.kind === "code" ? <CodeView tab={tab} visible={tab.id === active?.id} />
+                   : tab.kind === "links" ? <LinksPageView tab={tab} />
                    : <HelpView tab={tab} />}
                 </div>
               ))}
@@ -115,6 +117,7 @@ function Workbench({ onSignedOut }: { onSignedOut: () => void }) {
             {active?.kind === "doc" && <DocInspector tab={active} />}
             {active?.kind === "code" && <CodeInspector tab={active} />}
             {active?.kind === "help" && <Empty>Help pages are on the left; the <b>?</b> at the top of a view opens its page.</Empty>}
+            {active?.kind === "links" && <Empty>The report is on the left: each link's state and where it would be re-pointed. Untick what you don't want changed, then download.</Empty>}
             {!active && <Empty>What's related to the passage or symbol you're looking at appears here.</Empty>}
           </Panel>
         </PanelGroup>

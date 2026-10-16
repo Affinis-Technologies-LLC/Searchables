@@ -12,6 +12,7 @@ export function TabBar() {
   const title = (tab: Tab) =>
     tab.kind === "doc" ? app.overview.documents.find((d) => d.id === tab.docId)?.title ?? "Document"
     : tab.kind === "help" ? `Help · ${titleOf(tab.page)}`
+    : tab.kind === "links" ? `Links · ${tab.filename}`
     : tab.path.split("/").pop() ?? tab.path;
   const closing = app.closing;
   const settle = async (choice: "save" | "discard" | "cancel") => {
@@ -41,7 +42,7 @@ export function TabBar() {
                title={tab.kind === "code" ? tab.path : title(tab)}
                onClick={() => app.activate(tab.id)}
                onAuxClick={(e) => { if (e.button === 1) app.close(tab.id); }}>
-            <Icon name={tab.kind === "doc" ? "file" : tab.kind === "help" ? "help" : "code"} size={14} />
+            <Icon name={tab.kind === "doc" ? "file" : tab.kind === "help" ? "help" : tab.kind === "links" ? "links" : "code"} size={14} />
             <span className="tab-title">{title(tab)}{tab.kind === "code" && unsaved.has(tab.fileId) && <span className="unsaved" title="Unsaved changes"> ●</span>}</span>
             <button type="button" className="tab-close" title="Close"
                     onClick={(e) => { e.stopPropagation(); app.close(tab.id); }}>

@@ -3,7 +3,7 @@ import { api, query } from "../api";
 import { insertAtCursor } from "../code/editors";
 import { useDebounced, useLoad } from "../hooks";
 import { DocTab, useApp } from "../store";
-import { Block, CodeSymbol, EnumComparison, PageData, Related, RelatedItem, TableAsCode } from "../types";
+import { Block, CodeSymbol, EnumComparison, PageData, Related, RelatedItem, TableAsCode, TypeComparison } from "../types";
 import { Badge, CopyButton, Empty, Icon, saveText, Segments, Status, Table, tableToCsv } from "../ui";
 import { usePage } from "./pages";
 
@@ -150,10 +150,12 @@ function Objects({ tab, data }: { tab: DocTab; data: PageData }) {
 function ObjectCard({ block, tab, title }: { block: Block; tab: DocTab; title: string }) {
   const app = useApp();
   // A table continued over several pages is shown (and downloaded) joined
-  const joined = useLoad(() => (block.kind === "table" ? api.get<{ caption: string; columns: string[]; rows: string[][]; pages: number[] }>(`/blocks/${block.id}/table`) : null), [block.id]);
+  const joined = useLoad(() => (block.kind === "table" ? api.get<{ caption: string; columns: string[]; rows: string[][]; pages: number[]; layout: boolean; unit: string }>(`/blocks/${block.id}/table`) : null), [block.id]);
   const pinned = !!block.pin_key && app.pinned.has(block.pin_key);
-  const [code, setCode] = useState<"java" | "typescript" | null>(null);
-  const [comparing, setComparing] = useState(false);
+  const [code, setCode] = useState<{ language: "java" | "typescript"; shape: "enum" | "layout" } | null>(null);
+  const [comparing, setComparing] = useState<"enum" | "layout" | null>(null);
+  const toggleCode = (language: "java" | "typescript", shape: "enum" | "layout") =>
+    setCode(code && code.language === language && code.shape === shape ? null : { language, shape });
   return (
     <div className="card static">
       <header>
@@ -171,12 +173,21 @@ function ObjectCard({ block, tab, title }: { block: Block; tab: DocTab; title: s
             <button type="button" className="link" onClick={() => saveText(`${title} ${block.label || "table"}.csv`, tableToCsv(joined.data!))}>
               <Icon name="download" size={13} /> CSV
             </button>
-            <button type="button" className="link" onClick={() => setCode(code === "java" ? null : "java")}>As Java enum</button>
-            <button type="button" className="link" onClick={() => setCode(code === "typescript" ? null : "typescript")}>As TypeScript</button>
-            <button type="button" className="link" onClick={() => setComparing(!comparing)}>Compare with enum…</button>
+            <button type="button" className="link" onClick={() => toggleCode("java", "enum")}>As Java enum</button>
+            <button type="button" className="link" onClick={() => toggleCode("typescript", "enum")}>As TypeScript</button>
+            <button type="button" className="link" onClick={() => setComparing(comparing === "enum" ? null : "enum")}>Compare with enum…</button>
           </div>
-          {code && <AsCode blockId={block.id} language={code} />}
-          {comparing && <CompareEnum blockId={block.id} />}
+          {joined.data.layout && (
+            <div className="row wrap">
+              <span className="muted">A field layout in {joined.data.unit}:</span>
+              <button type="button" className="link" onClick={() => toggleCode("java", "layout")}>As Java record</button>
+              <button type="button" className="link" onClick={() => toggleCode("typescript", "layout")}>As TypeScript interface</button>
+              <button type="button" className="link" onClick={() => setComparing(comparing === "layout" ? null : "layout")}>Compare with type…</button>
+            </div>
+          )}
+          {code && <AsCode blockId={block.id} language={code.language} shape={code.shape} />}
+          {comparing === "enum" && <CompareEnum blockId={block.id} />}
+          {comparing === "layout" && <CompareLayout blockId={block.id} />}
         </>
       )}
     </div>
@@ -238,10 +249,10 @@ function Terms({ tab, data }: { tab: DocTab; data: PageData }) {
 }
 
 
-/** A table rendered as code (ADR-022): copy it, or insert it into the open editor. */
-function AsCode({ blockId, language }: { blockId: number; language: "java" | "typescript" }) {
+/** A table rendered as code (ADR-022), or as a field layout (ADR-030): copy it, or insert it into the open editor. */
+function AsCode({ blockId, language, shape }: { blockId: number; language: "java" | "typescript"; shape: "enum" | "layout" }) {
   const app = useApp();
-  const { data, loading, error } = useLoad<TableAsCode>(() => api.get(`/blocks/${blockId}/as-code?language=${language}`), [blockId, language]);
+  const { data, loading, error } = useLoad<TableAsCode>(() => api.get(`/blocks/${blockId}/as-code?language=${language}&shape=${shape}`), [blockId, language, shape]);
   const target = app.tabs.find((t) => t.kind === "code");
   return (
     <div>
@@ -249,13 +260,56 @@ function AsCode({ blockId, language }: { blockId: number; language: "java" | "ty
       {data && (
         <>
           <div className="row">
-            <span className="muted grow">{data.constants.length} constants · columns: {data.columns.map((c, i) => `${c} (${data.classes[i]})`).join(", ")}</span>
+            {data.shape === "layout"
+              ? <span className="muted grow">{data.fields.length} fields · {data.total} {data.unit} · {data.fields.map((f) => `${f.property} ${f.offset}+${f.width}`).join(", ")}</span>
+              : <span className="muted grow">{data.constants.length} constants · columns: {data.columns.map((c, i) => `${c} (${data.classes[i]})`).join(", ")}</span>}
             <CopyButton title="Copy the code" text={() => data.text} />
             <button type="button" disabled={!target} title={target ? "Insert at the cursor of the open file" : "Open a source file first"}
                     onClick={() => { if (target && target.kind === "code" && !insertAtCursor(target.fileId, data.text)) app.notify("Open the file in the editor to insert into it.", "error"); }}>Insert</button>
           </div>
+          {data.notes.map((note) => <div key={note} className="notice">{note}</div>)}
           <pre className="snippet">{data.text}</pre>
         </>
+      )}
+    </div>
+  );
+}
+
+/** The layout's fields against a class, record or interface of a codebase (ADR-030): names, then widths and offsets from its constants. */
+function CompareLayout({ blockId }: { blockId: number }) {
+  const app = useApp();
+  const [codebaseId, setCodebaseId] = useState<number>(app.overview.codebases[0]?.id ?? 0);
+  const [name, setName] = useState("");
+  const [symbolId, setSymbolId] = useState<number | null>(null);
+  const wanted = useDebounced(name.trim(), 250);
+  const types = useLoad<CodeSymbol[]>(() => (codebaseId && wanted ? api.get(`/codebases/${codebaseId}/symbols` + query({ q: wanted, kinds: ["record", "class", "interface", "type"] })) : null), [codebaseId, wanted]);
+  const result = useLoad<TypeComparison>(() => (symbolId ? api.get(`/blocks/${blockId}/compare-layout?symbol=${symbolId}`) : null), [blockId, symbolId]);
+  if (!app.overview.codebases.length) return <div className="muted">Add a codebase in the Code view to compare with its types.</div>;
+  return (
+    <div>
+      <div className="row">
+        <select value={codebaseId} onChange={(e) => { setCodebaseId(Number(e.target.value)); setSymbolId(null); }} aria-label="Codebase">
+          {app.overview.codebases.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <input type="search" className="grow" value={name} onChange={(e) => setName(e.target.value)} placeholder="Type name" aria-label="Type name" />
+      </div>
+      {types.data && !symbolId && types.data.slice(0, 8).map((s) => (
+        <button key={s.id} type="button" className="code-row usage" onClick={() => setSymbolId(s.id)}><span className="where">{s.kind}</span><code>{s.qualified}</code></button>
+      ))}
+      <Status loading={result.loading && !result.data} error={result.error} />
+      {result.data && (
+        <div className="notice">
+          <div className="grow">
+            <div><b>{result.data.type.qualified}</b> · {result.data.matched.length} matched · {result.data.missing_in_code.length} missing in the code · {result.data.extra_in_code.length} extra in the code</div>
+            {result.data.missing_in_code.length > 0 && <div>Missing in the code: {result.data.missing_in_code.join(", ")}</div>}
+            {result.data.extra.length > 0 && <div>Extra in the code: {result.data.extra.map((e) => <button key={e.symbol_id} type="button" className="link" onClick={() => app.setSymbolId(e.symbol_id)}>{e.name}</button>).reduce((a, b) => <>{a}, {b}</>)}</div>}
+            {result.data.differences.length > 0 && <div>Differs: {result.data.differences.map((d) => `${d.field} ${d.what} ${d.table} in the table, ${d.code} in the code`).join("; ")}</div>}
+            {result.data.by_name_only
+              ? <div className="muted">Names only: the code declares no width or offset constants (FIELD_BITS, FIELD_OFFSET) to compare with.</div>
+              : result.data.not_stated.length > 0 && <div className="muted">Not stated in the code: {result.data.not_stated.join(", ")}</div>}
+          </div>
+          <button type="button" onClick={() => setSymbolId(null)}>Another type</button>
+        </div>
       )}
     </div>
   );

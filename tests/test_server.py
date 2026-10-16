@@ -399,6 +399,41 @@ def test_tables_as_code_api(signed_in, monkeypatch):
     code = client.get(f"/api/blocks/{table['id']}/as-code?language=typescript").json()
     assert code["constants"] == ["REFERENCE_NUMBER", "STRENGTH"] and "as const" in code["text"]
     assert client.get(f"/api/blocks/{table['id']}/compare-enum?symbol=0").status_code == 404
+    # As a field layout (ADR-030)
+    joined = client.get(f"/api/blocks/{table['id']}/table").json()
+    assert joined["layout"] is True and joined["unit"] == "bits"
+    record = client.get(f"/api/blocks/{table['id']}/as-code?shape=layout&language=java").json()
+    assert record["shape"] == "layout" and record["total"] == 23 and "public record M32IInitialWord(int referenceNumber, int strength)" in record["text"]
+    assert [(f["property"], f["offset"], f["width"]) for f in record["fields"]] == [("referenceNumber", 0, 19), ("strength", 19, 4)]
+    assert client.get(f"/api/blocks/{table['id']}/compare-layout?symbol=0").status_code == 404
+    passage = next(b for b in page["blocks"] if b["kind"] != "table")
+    assert client.get(f"/api/blocks/{passage['id']}/as-code?shape=layout").status_code == 400
+
+
+def test_fix_links_api(signed_in):
+    """ADR-031: a PDF with dead links is checked, shown and downloaded fixed, without entering the library."""
+    import pymupdf
+    from tests.test_links import broken_pdf
+    client = signed_in
+    before = len(client.get("/api/state").json()["documents"])
+    report = client.post("/api/links/check?filename=XYZ-STD-9999A.pdf", content=broken_pdf(), headers=WRITE).json()
+    assert report["refused"] == "" and report["counts"] == {"ok": 1, "dead": 1, "wrong page": 1, "unresolved": 1, "external": 1}
+    assert [b["state"] for b in report["bookmarks"]] == ["ok", "unchecked", "ok", "wrong page", "dead"] and len(report["unlinked"]) == 1
+    assert [h["title"] for h in report["unbookmarked"]] == ["3 DEFINITIONS", "3.1 Acronyms and abbreviations"]
+    assert len(client.get("/api/state").json()["documents"]) == before                      # Not added to the library
+    token = report["token"]
+    image = client.get(f"/api/links/{token}/pages/2")
+    assert image.status_code == 200 and image.headers["content-type"] == "image/png" and image.content[:4] == b"\x89PNG"
+    dead = next(l for l in report["links"] if l["state"] == "dead")
+    download = client.get(f"/api/links/{token}/fixed?skip={dead['id']}&add=1")
+    assert download.status_code == 200 and download.headers["content-type"] == "application/pdf"
+    assert "XYZ-STD-9999A%20links%20fixed.pdf" in download.headers["content-disposition"]   # Parentheses are dropped from file names
+    doc = pymupdf.open("pdf", download.content)
+    assert doc.get_toc()[4][2] == 3 and len(doc[1].get_links()) == 6                         # The bookmark fixed, a link added
+    rebuilt = pymupdf.open("pdf", client.get(f"/api/links/{token}/fixed?outline=1").content)
+    assert [t[1] for t in rebuilt.get_toc()] == ["1 SCOPE", "3 DEFINITIONS", "3.1 Acronyms and abbreviations", "5 DETAILED REQUIREMENTS", "5.1 M3.2 Status message", "5.2 M 12.6 Summary message"]
+    assert client.get("/api/links/nope/fixed").status_code == 404
+    assert client.post("/api/links/check?filename=x.pdf", content=b"", headers=WRITE).status_code == 400
 
 
 def test_trace_api(signed_in, tmp_path):

@@ -301,3 +301,16 @@ def test_evaluate_code_reports_the_by_name_share(tmp_path):
     results = measure(str(SAMPLE), tmp_path / "measure.db", out=lines.append)
     assert results["java"]["calls"]["by_name"] <= 4 and results["java"]["calls"]["share"] < 0.3
     assert results["typescript"]["calls"]["linked"] >= 2 and any("by name:" in line for line in lines)
+
+
+def test_a_record_s_components_are_its_fields():
+    """ADR-030: `record W(int a, Item b)` declares two fields, so Usages, Rename and the layout comparison see them."""
+    parsed = parse("W.java", b"""package p;
+public record W(int referenceNumber, Item item) {
+    public static final int REFERENCE_NUMBER_BITS = 19;
+    int doubled() { return referenceNumber * 2; }
+}""")
+    fields = [(s.qualified, s.type, s.parent) for s in parsed.symbols if s.kind == "field"]
+    assert fields == [("p.W#referenceNumber", "int", 0), ("p.W#item", "Item", 0), ("p.W#REFERENCE_NUMBER_BITS", "int", 0)]
+    assert ("type", "Item") in {(r.kind, r.name) for r in parsed.refs}
+    assert ("use", "referenceNumber", 4) in {(r.kind, r.name, r.line) for r in parsed.refs}   # A bare read of a component

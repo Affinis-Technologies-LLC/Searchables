@@ -9,6 +9,7 @@ const ICONS: Record<string, string> = {
   compare: "M3 4h8v16H3zm2 2v12h4V6zm8-2h8v16h-8zm2 2v12h4V6z",
   collections: "M14 4l6 6-4 1-3 3 1 5-5-5-5 5 5-5-5-5 5 1 3-3z",
   library: "M4 4h4v16H4zm6 0h4v16h-4zm6.5.6 3.9 1 -3.6 14.8-3.9-1z",
+  links: "M7 7h5v2H7a3 3 0 0 0 0 6h5v2H7a5 5 0 0 1 0-10zm5 0h5a5 5 0 0 1 0 10h-5v-2h5a3 3 0 0 0 0-6h-5zm-4 4h8v2H8z",
   code: "M8.6 16.6 4 12l4.6-4.6L10 8.8 6.8 12l3.2 3.2zm6.8 0L14 15.2l3.2-3.2L14 8.8l1.4-1.4L20 12z",
   back: "M14 6l-6 6 6 6 1.4-1.4L10.8 12l4.6-4.6z",
   forward: "M10 6l6 6-6 6-1.4-1.4 4.6-4.6-4.6-4.6z",

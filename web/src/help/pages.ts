@@ -10,4 +10,4 @@ export function titleOf(page: string): string {
 }
 
 /** The order pages are listed in: the overview first, then the views in the activity bar's order. */
-export const ORDER = ["help", "search", "contents", "catalogue", "glossary", "compare", "collections", "code", "library"];
+export const ORDER = ["help", "search", "contents", "catalogue", "glossary", "compare", "collections", "code", "library", "links"];

@@ -2,7 +2,7 @@ import re
 import pymupdf
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src import config
 from src.extractor.identifiers import extract_occurrences
@@ -259,3 +259,42 @@ class PDFExtractor:
             bbox=(b[0], b[1], b[2], b[3]),
             provision="" if heading_only else classify_provision(clean_text),
         )
+
+
+# ---- Link and outline destinations (ADR-031) ---------------------------------------------------
+
+_REF = re.compile(r"^(\d+) 0 R$")
+
+
+def destination_of(doc: pymupdf.Document, xref: int, page_xrefs: Dict[int, int]) -> Tuple[str, str, Optional[int], str]:
+    """
+    (kind, target, page index, why dead) of a link or outline item from its /Dest or /A: "goto"
+    with a page, "named" with the name, "uri" with the address; the page is None when dead. Read at
+    the raw object level because get_links() and get_toc() report a destination whose page object
+    is missing as page 1 (ADR-031).
+    """
+    kind, value = doc.xref_get_key(xref, "Dest")
+    if kind == "null":
+        action = doc.xref_get_key(xref, "A/S")[1]
+        if action == "/URI":
+            return "uri", doc.xref_get_key(xref, "A/URI")[1].strip("()"), None, ""
+        if action not in ("/GoTo",):
+            return "other", action.lstrip("/") or "action", None, ""
+        kind, value = doc.xref_get_key(xref, "A/D")
+    if kind == "array":
+        first = value.strip("[]").split("/")[0].strip()
+        if _REF.match(first):
+            number = int(_REF.match(first).group(1))
+            if number in page_xrefs:
+                return "goto", f"page {page_xrefs[number] + 1}", page_xrefs[number], ""
+            return "goto", "a page object that doesn't exist", None, "dead"
+        if first.isdigit() and int(first) < len(page_xrefs):
+            return "goto", f"page {int(first) + 1}", int(first), ""
+        return "goto", "a page that doesn't exist", None, "dead"
+    if kind in ("string", "name"):
+        name = value.strip("()").lstrip("/")
+        found = doc.resolve_names().get(name)
+        if found and found.get("page", -1) >= 0:
+            return "named", f"page {found['page'] + 1} ('{name}')", found["page"], ""
+        return "named", f"named destination '{name}'", None, "dead"
+    return "goto", "no destination", None, "dead"

@@ -537,7 +537,18 @@ class _JavaReader(_Reader):
         self.fields.append(set(self.fields[-1]))
         self.method_locals.append(set())            # A type body starts a new scope: outer methods' locals aren't visible
         for child in node.named_children:
-            if child.type in ("formal_parameters", "type_parameters"):   # A record's components
+            if child.type == "formal_parameters":   # A record's components are its fields (ADR-030)
+                for component in child.named_children:
+                    name_node, type_node = component.child_by_field_name("name"), component.child_by_field_name("type")
+                    if name_node is None:
+                        continue
+                    type_name = _java_type_full(type_node)
+                    members[_text(name_node)] = type_name
+                    self.fields[-1].add(_text(name_node))
+                    self.symbol("field", _text(name_node), f"{qualified}#{_text(name_node)}", index, component, type=type_name)
+                    if type_node is not None:
+                        self.visit(type_node, index, qualified, members, prefix)
+            elif child.type == "type_parameters":
                 self.visit(child, index, qualified, members, prefix)
         if body is not None:
             # Fields first: methods above a field's declaration still call through it

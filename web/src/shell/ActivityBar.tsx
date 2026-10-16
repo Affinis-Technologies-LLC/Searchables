@@ -11,6 +11,7 @@ const ACTIVITIES: { id: Activity; icon: string; label: string; hint: string }[] 
   { id: "collections", icon: "collections", label: "Pins", hint: "Collections of pinned passages, tables and code" },
   { id: "code", icon: "code", label: "Code", hint: "Browse source code: symbols, usages, calls, dependencies, APIs" },
   { id: "library", icon: "library", label: "Library", hint: "Add and manage documents" },
+  { id: "links", icon: "links", label: "Links", hint: "Check a PDF's internal links and bookmarks and download it fixed" },
   { id: "help", icon: "help", label: "Help", hint: "What each view does (F1)" },
 ];
 

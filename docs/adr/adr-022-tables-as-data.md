@@ -1,7 +1,8 @@
 # ADR-022: Tables as data
 
 **Status:** accepted 2026-10-11 (agreed as part of the roadmap; the record for step 11, written
-before building it).
+before building it). Amended by ADR-030 (2026-10-16): a table with a width column is also rendered as
+a field layout — a record or an interface with offsets and widths — and compared with a type.
 
 ## Context
 

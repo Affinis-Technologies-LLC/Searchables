@@ -4,7 +4,7 @@ import { drafts } from "./code/drafts";
 import { api } from "./api";
 import { At, BBox, Block, Overview } from "./types";
 
-export type Activity = "search" | "contents" | "catalogue" | "glossary" | "compare" | "collections" | "library" | "code" | "help";
+export type Activity = "search" | "contents" | "catalogue" | "glossary" | "compare" | "collections" | "library" | "code" | "links" | "help";
 
 /** What a document tab highlights: the words of a search, or an identifier. */
 export interface Highlight { q?: string; identifier?: string; children?: boolean }
@@ -24,7 +24,10 @@ export interface CodeTab { id: string; kind: "code"; fileId: number; path: strin
 
 export interface HelpTab { id: string; kind: "help"; page: string; nonce: number }
 
-export type Tab = DocTab | CodeTab | HelpTab;
+/** A page of a PDF being checked for dead links (ADR-031): not in the library, shown as an image with one link outlined. */
+export interface LinksTab { id: string; kind: "links"; token: string; filename: string; page: number; pageCount: number; rect: BBox | null; nonce: number }
+
+export type Tab = DocTab | CodeTab | HelpTab | LinksTab;
 
 export interface DocLocation { docId: number; page: number; target?: BBox | null; blockId?: number | null; highlight?: Highlight }
 export interface CodeLocation { fileId: number; path: string; line: number }
@@ -43,6 +46,7 @@ interface AppContext {
   openDoc: (location: DocLocation) => void;
   openCode: (location: CodeLocation) => void;
   openHelp: (page: string) => void;
+  openLinks: (location: { token: string; filename: string; page: number; pageCount: number; rect?: BBox | null }) => void;
   updateDoc: (id: string, patch: Partial<DocTab>) => void;
   updateCode: (id: string, patch: Partial<CodeTab>) => void;
   filesVersion: number;         // Bumped when a file was saved, created, renamed or deleted: file views load again
@@ -177,6 +181,11 @@ export function AppProvider({ initial, children }: { initial: Overview; children
     show({ id: "help", kind: "help", page, nonce: nonce.current++ }, true);
   }, [show]);
 
+  const openLinks = useCallback((location: { token: string; filename: string; page: number; pageCount: number; rect?: BBox | null }) => {
+    show({ id: "links", kind: "links", token: location.token, filename: location.filename, page: location.page,
+           pageCount: location.pageCount, rect: location.rect ?? null, nonce: nonce.current++ }, true);
+  }, [show]);
+
   const updateDoc = useCallback((id: string, patch: Partial<DocTab>) => {
     setTabs((all) => all.map((t) => (t.id === id && t.kind === "doc" ? { ...t, ...patch } : t)));
   }, []);
@@ -251,7 +260,7 @@ export function AppProvider({ initial, children }: { initial: Overview; children
   const value = useMemo<AppContext>(() => ({
     overview, refresh, activity, setActivity, tabs,
     active: tabs.find((t) => t.id === activeId) ?? null,
-    activate: setActiveId, close, openDoc, openCode, openHelp, updateDoc, updateCode, filesVersion, filesChanged, closing, setClosing, inspectorView, setInspectorView,
+    activate: setActiveId, close, openDoc, openCode, openHelp, openLinks, updateDoc, updateCode, filesVersion, filesChanged, closing, setClosing, inspectorView, setInspectorView,
     back: () => step(-1), forward: () => step(1),
     canGoBack: history.current.index > 0,
     canGoForward: history.current.index < history.current.places.length - 1,

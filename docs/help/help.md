@@ -28,6 +28,7 @@ view opens its page.
 - [Pins](collections.md): collections of passages, tables and code, with notes, exported to Word
 - [Code](code.md): browse, edit and get examples from a codebase
 - [Library](library.md): add documents and keep them indexed
+- [Links](links.md): check a PDF's internal links and bookmarks and download it fixed
 
 ## Moving about
 

@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 import json
 import re
+import pymupdf
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,8 @@ from src import config
 from src.extractor.identifiers import (family_of, find_candidates, identifier_key, normalize_text, parent_key,
                                        summarize_families)
 from src.extractor.objects import parse_caption, standard_pattern
-from src.extractor.pdf import PDFExtractor
+from src.extractor.pdf import PDFExtractor, destination_of
+from src.extractor.structure import match_outline
 from src.research.assess import assess
 from src.search import semantic
 from src.extractor.provisions import NOTE, PERMISSION, RECOMMENDATION, REQUIREMENT, classify_provision
@@ -1292,6 +1294,8 @@ class Library:
 
         def check(name: str, value, note: str = "", warn: bool = False) -> dict:
             return {"name": name, "value": str(value), "note": note, "warn": warn}
+
+        bookmarks = self._bookmarks_check(doc, check)
         return [
             check("Passages", f"{blocks:,}", f"on {pages_read:,} of {doc.page_count:,} pages"),
             check("Pages with no text read", empty,
@@ -1323,7 +1327,43 @@ class Library:
                   f"{vectors:,} passages and table row runs read by the model" if vectors else "",
                   warn=doc.embedding_model != config.EMBEDDING_ID),
             check("Distribution statement", "found" if doc.distribution else "none found", doc.distribution),
+            bookmarks,
         ]
+
+    def _bookmarks_check(self, doc: Document, check) -> dict:
+        """The stored PDF's bookmarks against the clauses found (ADR-032): warned only when they disagree."""
+        headings = [_row_to_block(r) for r in self.conn.execute(
+            "SELECT * FROM blocks WHERE doc_id = ? AND kind = 'heading' ORDER BY seq", (doc.id,))]
+        path = self.pdf_path(doc.sha256)
+        entries = []
+        if path.exists():
+            try:
+                with pymupdf.open(path) as pdf:
+                    pages = {pdf.page_xref(i): i for i in range(pdf.page_count)}
+                    for level, title, _, detail in pdf.get_toc(simple=False):
+                        # get_toc() reports a bookmark to a missing page object as page 1: the raw destination decides
+                        if detail.get("xref"):
+                            kind, _, page_index, why = destination_of(pdf, detail["xref"], pages)
+                            entries.append((level, title, None if why == "dead" or kind not in ("goto", "named") else page_index + 1))
+                        else:
+                            entries.append((level, title, None))
+            except Exception:
+                return check("Bookmarks", "unreadable", "The stored PDF's outline couldn't be read.")
+        if not entries:
+            return check("Bookmarks", "none", f"The PDF has no outline; the Links view can add them from the {len(headings)} clauses found."
+                         if headings else "The PDF has no outline.")
+        matches, unnamed = match_outline(entries, headings)
+        wrong = sum(1 for m in matches if m.heading is not None and m.page is not None and m.page != m.heading.page)
+        gone = sum(1 for m in matches if m.page is None)
+        parts = []
+        if wrong:
+            parts.append(f"{wrong} point{'s' if wrong == 1 else ''} at the wrong page")
+        if gone:
+            parts.append(f"{gone} whose destination is gone")
+        if unnamed:
+            parts.append(f"{len(unnamed)} clause{'s' if len(unnamed) != 1 else ''} have none")
+        note = ("; ".join(parts) + ". The Links view re-points them and can rebuild the outline from the clauses.") if parts else "They agree with the clauses found."
+        return check("Bookmarks", f"{len(entries)} for {len(headings)} clauses", note, warn=bool(wrong or gone))
 
     # ---- Cross-references ------------------------------------------------------------------
 

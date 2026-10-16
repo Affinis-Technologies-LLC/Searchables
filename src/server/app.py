@@ -11,6 +11,7 @@ import csv
 import dataclasses
 import io
 import json
+import secrets
 import subprocess
 import re
 import sqlite3
@@ -45,10 +46,11 @@ from src.code.snapshots import diff_against, take_snapshot
 from src.code.unused import unused_in
 from src.code.store import Conflict, CodeStore
 from src import version
-from src.research.tables_as_code import as_code, compare_with_enum
+from src.research import links
+from src.research.tables_as_code import as_code, compare_with_enum, compare_with_type, layout_of
 from src.research.trace import code_mentions, identifiers_in_file
 from src.extractor.identifiers import identifier_key
-from src.extractor.pdf import ocr_available
+from src.extractor.pdf import PDFExtractor, ocr_available
 from src.models import Document, TextBlock
 from src.research import export
 from src.research.collections import CollectionStore, pin_key
@@ -91,6 +93,7 @@ class Services:
                 self._glossaries: Dict[tuple, list] = {}
                 self._comparisons: Dict[tuple, list] = {}
                 self.ocr = ocr_available()   # Looked for once: asking starts the tesseract program
+                self.link_checks: Dict[str, tuple] = {}   # token → (file bytes, report): the Links view's uploads (ADR-031)
                 self._ready = True
 
     def document(self, doc_id: int) -> Document:
@@ -616,7 +619,8 @@ def block_table(c: Call) -> dict:
     table = _table(services.block(c.path["id"]))
     if table is None:
         raise NotFound("That passage isn't a table.")
-    return table
+    layout = layout_of(table["columns"], table["rows"])   # Whether the card may offer the record/interface (ADR-030)
+    return {**table, "layout": layout is not None, "unit": layout.unit if layout else ""}
 
 
 @api("GET", "/catalogue/code")
@@ -652,15 +656,68 @@ def code_file_identifiers(c: Call) -> list:
 
 @api("GET", "/blocks/{id:int}/as-code")
 def block_as_code(c: Call) -> dict:
-    """A table as a Java enum or a TypeScript constant object (ADR-022)."""
+    """A table as a Java enum or a TypeScript constant object (ADR-022), or with shape=layout as a record/interface (ADR-030)."""
     language = "typescript" if c.query.get("language") == "typescript" else "java"
-    return plain(as_code(services.library, services.block(c.path["id"]), language, c.query.get("name", "")[:60]))
+    shape = "layout" if c.query.get("shape") == "layout" else "enum"
+    return plain(as_code(services.library, services.block(c.path["id"]), language, c.query.get("name", "")[:60], shape))
+
+
+@api("GET", "/blocks/{id:int}/compare-layout")
+def block_compare_layout(c: Call) -> dict:
+    """The layout's fields against a class, record or interface of a codebase (ADR-030)."""
+    return plain(compare_with_type(services.library, services.code, services.block(c.path["id"]), _symbol(int(c.query.get("symbol", 0)))))
 
 
 @api("GET", "/blocks/{id:int}/compare-enum")
 def block_compare_enum(c: Call) -> dict:
     """The table's constants against an enum of a codebase (ADR-022)."""
     return plain(compare_with_enum(services.library, services.code, services.block(c.path["id"]), _symbol(int(c.query.get("symbol", 0)))))
+
+
+# ---- Fixing a PDF's dead links (ADR-031) --------------------------------------------------------
+
+LINK_CHECKS_KEPT = 3   # Uploads held in memory for the Links view; older ones are dropped
+
+
+def _link_check(token: str) -> tuple:
+    found = services.link_checks.get(token)
+    if found is None:
+        raise NotFound("That check has gone; upload the PDF again.")
+    return found
+
+
+@api("POST", "/links/check")
+def check_links(c: Call) -> dict:
+    """The report on a PDF's links and bookmarks; the file is held in memory under a token, not added to the library."""
+    name = Path(c.query.get("filename", "document.pdf")).name
+    if not c.body:
+        raise ValueError("The file is empty.")
+    report = links.check(c.body, name, PDFExtractor(use_ocr=False))
+    token = secrets.token_urlsafe(9)
+    with services.lock:
+        services.link_checks[token] = (c.body, report)
+        for old in list(services.link_checks)[:-LINK_CHECKS_KEPT]:
+            del services.link_checks[old]
+    return {"token": token, **plain(report)}
+
+
+@api("GET", "/links/{token}/pages/{page:int}")
+def link_check_page(c: Call) -> Response:
+    file_bytes, _ = _link_check(c.path["token"])
+    return Response(links.page_image(file_bytes, c.path["page"]), media_type="image/png")
+
+
+@api("GET", "/links/{token}/fixed")
+def link_check_fixed(c: Call) -> Response:
+    """
+    The fixed PDF as a download: every proposed fix except the skipped ids; links added for unlinked
+    references with add=1; the outline rebuilt from the headings with outline=1 (ADR-032).
+    """
+    file_bytes, report = _link_check(c.path["token"])
+    skip = {int(x) for x in c.query.get("skip", "").split(",") if x.strip().isdigit()}
+    result = links.fixed(file_bytes, report, skip, c.query.get("add") == "1", c.query.get("outline") == "1")
+    stem = Path(report.filename).stem
+    return _download(result, f"{stem} links fixed.pdf", "application/pdf")
 
 
 # ---- Collections --------------------------------------------------------------------------------
