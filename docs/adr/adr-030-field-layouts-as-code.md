@@ -164,6 +164,10 @@ On the fixture standard (tests first, `tests/test_tables_as_code.py`):
   the component's type recorded as a type reference and bare reads inside the body as `use`
   references; the parameters are no longer locals of the type scope. `tests/test_code.py` covers
   it; the fixtures' symbol counts are unchanged (no fixture declares a record).
+- **Noticed after 1.5.0 shipped (2026-10-16):** the build above left `PARSER_VERSION` at 2, so an
+  index from 1.4.0 keeps its old symbols for files holding records until they change. Bumped to 3
+  on `main` with a test that an older parser's files are read again on the next scan; it reaches
+  users in the next release. Documents need no re-indexing: the extractor version is unchanged.
 - `src/server/app.py`: `/blocks/{id}/table` answers `layout` and `unit`; `/blocks/{id}/as-code`
   takes `shape=layout`; `/blocks/{id}/compare-layout?symbol=`. A non-table or a non-layout is a 400
   with the reason.

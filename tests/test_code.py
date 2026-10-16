@@ -64,6 +64,18 @@ def test_rescan_reads_only_what_changed(store, code):
     assert where(store.usages(find(store, code, "format")), RESOLVED) == ["App.jsx:5", "UserCard.tsx:9"]
 
 
+def test_a_newer_parser_re_reads_every_file_on_the_next_scan(store, code):
+    """The parser-version bump (ADR-025, ADR-030): files read by an older parser are read again, unchanged or not."""
+    from src.code.store import CodeStore, PARSER_VERSION
+    assert store.index(code.id)["changed"] == 0
+    store.conn.execute("UPDATE code_files SET parser = ? WHERE path LIKE '%.java'", (PARSER_VERSION - 1,))
+    store.conn.commit()
+    again = CodeStore(store.conn)                   # Opening the index is what notices the older parser
+    java = store.conn.execute("SELECT COUNT(*) FROM code_files WHERE path LIKE '%.java'").fetchone()[0]
+    assert again.index(code.id)["changed"] == java and java > 0
+    assert store.conn.execute("SELECT COUNT(*) FROM code_files WHERE parser < ?", (PARSER_VERSION,)).fetchone()[0] == 0
+
+
 def test_windows_line_endings_and_encodings(store, tmp_path):
     root = tmp_path / "win"
     root.mkdir()

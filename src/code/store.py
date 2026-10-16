@@ -398,7 +398,7 @@ def java_package(qualified: str) -> str:
 
 # Columns added after the first release of the code index; CREATE TABLE IF NOT EXISTS won't add them
 _PARSED_COLUMNS = {"type", "chain", "shape", "type_params", "type_args", "callback", "parser"}
-PARSER_VERSION = 2   # Bumped when the parser records more from the same file (2: member accesses as references, ADR-025)   # Filled by the parser: an index from before they existed must be re-read
+PARSER_VERSION = 3   # Bumped when the parser records more from the same file (2: member accesses as references, ADR-025; 3: record components as fields, ADR-030)   # Filled by the parser: an index from before they existed must be re-read
 _ADDED_COLUMNS = {"code_symbols": [("type", "TEXT NOT NULL DEFAULT ''"), ("type_params", "TEXT NOT NULL DEFAULT ''")],
                   "code_refs": [("chain", "TEXT NOT NULL DEFAULT ''"), ("shape", "TEXT NOT NULL DEFAULT ''"),
                                 ("stmt_start", "INTEGER NOT NULL DEFAULT 0"), ("stmt_end", "INTEGER NOT NULL DEFAULT 0"),
