@@ -1,4 +1,5 @@
 """The web API, called as the browser front end calls it."""
+import threading
 import time
 from pathlib import Path
 
@@ -6,7 +7,10 @@ import pytest
 from starlette.testclient import TestClient
 
 from src import config
+from src.search import semantic
+from src.search.indexer import Job
 from src.server import app as server
+from conftest import fake_vectors
 
 PASSWORD = "correct horse battery"
 WRITE = {"X-Requested-With": "searchables"}
@@ -491,3 +495,32 @@ def test_git_and_rename_api(signed_in, tmp_path):
     assert any(e["text"].strip() == "import com.shop.model.Order;" for e in preview["edits"]) and any(e["symbol"].endswith("Order#Order") for e in preview["edits"])
     done = client.post(f"/api/code/symbols/{order['id']}/rename", json={"name": "Purchase", "edits": [e["key"] for e in preview["edits"] if e["selected"]], "rename_file": True}, headers=WRITE).json()
     assert done["renamed_file"] == "backend/src/main/java/com/shop/model/Purchase.java" and (tmp_path / "shop" / done["renamed_file"]).exists()
+
+
+def test_state_answers_while_a_search_waits_for_the_model(signed_in, standard_pdf, monkeypatch):
+    """ADR-033: the query embedding is computed outside the API lock, so the status bar keeps moving."""
+    client = signed_in
+    assert client.post("/api/documents?filename=WAIT-STD-1.pdf", content=standard_pdf + b"\n% wait", headers=WRITE).status_code == 200
+    wait_for_jobs(client)
+    waiting, carry_on = threading.Event(), threading.Event()
+
+    def slow_query(text):
+        waiting.set()
+        assert carry_on.wait(10)
+        return fake_vectors([text])[0]
+
+    monkeypatch.setattr(semantic, "embed_query", slow_query)
+    answers = []
+    search = threading.Thread(target=lambda: answers.append(client.get("/api/search?q=how long must calibration records be kept")))
+    search.start()
+    assert waiting.wait(10)
+    started = time.time()
+    state = client.get("/api/state")
+    assert state.status_code == 200 and time.time() - started < 2, "state waited behind the search's model step"
+    assert not answers   # The search is still waiting for the model
+    carry_on.set()
+    search.join(10)
+    assert answers and answers[0].status_code == 200 and answers[0].json()["results"]
+
+    job = server._job(Job(id=1, kind="add", name="x.pdf", resumed=True, restarted=True))
+    assert (job["resumed"], job["restarted"]) == (True, True)

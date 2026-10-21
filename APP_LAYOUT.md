@@ -6,7 +6,7 @@ Searchables/
 │       ├── App.tsx             # Sign-in, then the workbench: views | tabs | inspector | status bar
 │       ├── store.tsx           # Shared state: overview, open tabs, navigation history, pins
 │       ├── api.ts, types.ts    # Calls to the server and the shapes it returns
-│       ├── shell/              # Sign-in page, activity bar, tab bar, status bar, About
+│       ├── shell/              # Sign-in page, activity bar, tab bar, status bar, About, job labels (ADR-033)
 │       ├── help/               # Help inside the app: the pages (from docs/help), the Markdown reader, the panel and view
 │       ├── documents/          # Search, PDF page view, inspector, contents, catalogue, glossary, compare, pins, library, links (dead-link fixing)
 │       └── code/               # Code panel (search and replace, files, dependencies, APIs), editor with saving (drafts.ts, editing.ts), inspector, Examples view (assistant.ts)

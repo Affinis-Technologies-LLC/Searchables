@@ -57,6 +57,7 @@ from src.research.collections import CollectionStore, pin_key
 from src.research.compare import compare, provision_change, to_markdown, word_diff_html
 from src.research.glossary import build_acronyms, build_glossary, expand_acronyms, terms_in_text
 from src.search import semantic
+from src.search.query import build_fts_query
 from src.search.indexer import ADD, CODE, EMBED, REINDEX, Indexer
 from src.search.library import (CONTENT_KINDS, IDENTIFIER_GROUP_TITLES, PROVISION_FILTERS, RELATED_GROUPS, Library,
                                 table_caption, uses_meaning)
@@ -290,7 +291,8 @@ def session_password(c: Call) -> dict:
 
 def _job(job) -> dict:
     return {"id": job.id, "kind": job.kind, "name": job.name, "status": job.status, "stage": job.stage,
-            "done": job.done, "total": job.total, "result": job.result, "warning": job.warning}
+            "done": job.done, "total": job.total, "result": job.result, "warning": job.warning,
+            "resumed": job.resumed, "restarted": job.restarted}
 
 
 @api("GET", "/state")
@@ -532,18 +534,30 @@ def _block_terms(block: TextBlock, docs: Dict[int, Document]) -> list:
     return _terms(terms_in_text(services.glossary(doc), block.text)) if doc and block.kind == "text" else []
 
 
-@api("GET", "/search")
+@api("GET", "/search", locked=False)
 def search(c: Call) -> dict:
     library = services.library
     query = c.query.get("q", "")
     by_position = c.query.get("order") == "document"
     limit = min(int(c.query.get("limit", config.DEFAULT_MAX_RESULTS)), config.MAX_DOCUMENT_ORDER_RESULTS)
-    # The model doesn't know the documents' acronyms: a plain-word search has them spelled out (and the reverse)
-    expansions = expand_acronyms(query, services.acronyms(c.ints("docs"))) if uses_meaning(query) else []
-    expanded = " ".join([query, *(f"{acronym} {meaning}" for acronym, meaning in expansions)]) if expansions else ""
+    doc_ids, kinds, provisions = c.ints("docs"), c.words("kinds"), c.words("provisions")
+    plain = uses_meaning(query)
+    with services.lock:
+        # The model doesn't know the documents' acronyms: a plain-word search has them spelled out (and the reverse)
+        expansions = expand_acronyms(query, services.acronyms(doc_ids)) if plain else []
+        expanded = " ".join([query, *(f"{acronym} {meaning}" for acronym, meaning in expansions)]) if expansions else ""
+        wanted = plain and bool(build_fts_query(query)) and library.wants_query_vector(expanded or query, doc_ids, kinds, provisions)
+    # The query's meaning vector waits for the indexer's batch of the model: computed outside the lock,
+    # so the status bar and every other call carry on meanwhile (ADR-033)
+    vector = semantic.embed_query(expanded or query) if wanted else None
+    with services.lock:
+        return _search_response(library, query, doc_ids, kinds, provisions, by_position, limit, expansions, expanded, vector)
+
+
+def _search_response(library, query, doc_ids, kinds, provisions, by_position, limit, expansions, expanded, vector) -> dict:
     results, total = library.search(
-        query, doc_ids=c.ints("docs"), limit=config.MAX_DOCUMENT_ORDER_RESULTS if by_position else limit,
-        document_order=by_position, kinds=c.words("kinds"), provisions=c.words("provisions"), expanded=expanded)
+        query, doc_ids=doc_ids, limit=config.MAX_DOCUMENT_ORDER_RESULTS if by_position else limit,
+        document_order=by_position, kinds=kinds, provisions=provisions, expanded=expanded, query_vector=vector)
     library.record_search(query)
     docs = {d.id: d for d in library.list_documents()}
     return {

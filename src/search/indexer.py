@@ -30,6 +30,7 @@ class Job:
     sha256: Optional[str] = None    # ADD: the upload, as stored in the library folder
     doc_id: Optional[int] = None    # The document; for CODE, the codebase
     resumed: bool = False           # Left unfinished by an earlier run of the app
+    restarted: bool = False         # Resumed before its pages were all read: they're read again from the first (ADR-033)
     status: str = QUEUED
     stage: str = "Waiting"
     done: int = 0
@@ -55,8 +56,10 @@ class Indexer:
         with self._lock:
             self._queue = self.library_factory()
             for row in self._queue.unfinished_jobs():
+                # An add whose document isn't in the library yet stopped during reading, which starts over
+                restarted = row["kind"] == ADD and bool(row["sha256"]) and self._queue.document_by_sha(row["sha256"]) is None
                 self.jobs.append(Job(id=row["id"], kind=row["kind"], name=row["name"], sha256=row["sha256"],
-                                     doc_id=row["doc_id"], resumed=True))
+                                     doc_id=row["doc_id"], resumed=True, restarted=restarted))
             self._start_worker()
 
     def submit(self, kind: str, name: str, file_bytes: Optional[bytes] = None, doc_id: Optional[int] = None) -> Job:

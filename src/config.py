@@ -31,7 +31,8 @@ EMBEDDING_REVISION = "f52bf8ec8c7124536f0efb74aca902b2995e5bcd"
 EMBEDDING_DIMENSIONS = 768
 EMBEDDING_ID = f"{EMBEDDING_MODEL}@{EMBEDDING_REVISION[:12]}"  # Stored per document to spot stale vectors
 EMBEDDING_DEVICE = "cpu"
-EMBEDDING_BATCH = 8               # Passages read per step while indexing; a search waits at most one step for the model
+EMBEDDING_BATCH = 4               # Passages read per step while indexing; a search waits at most one step for the model
+                                  # (four: no slower than eight, and half the wait; ADR-033)
 EMBEDDING_COMMIT = 128            # Vectors are saved this often, so interrupted indexing resumes from here
 EMBEDDING_MAX_CHARS = 2000        # Longer passages are cut; the model reads ~512 tokens anyway
 EMBEDDING_TABLE_CHARS = 1200      # Longer tables also get a vector per run of rows this long (with caption and header)

@@ -57,7 +57,18 @@ def get_model():
                 device=config.EMBEDDING_DEVICE,
                 local_files_only=model_files_present(),  # Never contact the internet once downloaded
             )
+            import torch
+            torch.set_num_threads(indexing_threads(os.cpu_count() or 1))
         return _model
+
+
+def indexing_threads(cores: int) -> int:
+    """
+    The model's share of the machine while it indexes: half the hardware threads, at least two, never
+    more than there are. Measured no slower than all of them, and the server and the browser keep
+    the rest (ADR-033).
+    """
+    return max(1, min(cores, max(2, cores // 2)))
 
 
 def _encode(texts: Sequence[str], waited_for: bool = False) -> np.ndarray:

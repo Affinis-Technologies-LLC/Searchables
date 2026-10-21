@@ -5,7 +5,7 @@ import { useApp } from "../store";
 import { DocumentInfo, HealthCheck, IdentifierFamily, Job } from "../types";
 import { Empty, Icon, Status } from "../ui";
 
-const JOB_LABEL = { add: "Adding", reindex: "Re-indexing", embed: "Adding meaning search to", code: "Scanning" };
+import { jobProgress, jobTitle } from "../shell/jobs";
 
 /** Add PDFs and manage the library: rename, re-index, delete, and each document's identifier patterns. */
 export function LibraryPanel() {
@@ -87,11 +87,9 @@ function Jobs({ active, finished }: { active: Job[]; finished: Job[] }) {
           {job.status === "running"
             ? <>
                 <progress value={job.total ? job.done / job.total : undefined} max={1} />
-                <span>{JOB_LABEL[job.kind]} {job.name}: {job.total
-                  ? `${job.stage.toLowerCase()} ${job.done.toLocaleString()} of ${job.total.toLocaleString()}`
-                  : "starting (loading the language model the first time)…"}</span>
+                <span>{jobTitle(job)}: {jobProgress(job)}</span>
               </>
-            : <span className="muted">Waiting: {JOB_LABEL[job.kind].toLowerCase()} {job.name}</span>}
+            : <span className="muted">Waiting: {jobTitle(job)}</span>}
         </div>
       ))}
       {[...finished].reverse().slice(0, 5).map((job) => (

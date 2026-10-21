@@ -3,8 +3,7 @@ import { api } from "../api";
 import { useApp } from "../store";
 import { Icon } from "../ui";
 import { About } from "./About";
-
-const JOB_LABEL = { add: "Adding", reindex: "Re-indexing", embed: "Adding meaning search to", code: "Scanning" };
+import { jobProgress, jobTitle } from "./jobs";
 
 export function StatusBar({ onSignedOut }: { onSignedOut: () => void }) {
   const app = useApp();
@@ -25,8 +24,7 @@ export function StatusBar({ onSignedOut }: { onSignedOut: () => void }) {
       {running ? (
         <span className="status-job" title={running.stage}>
           <progress value={running.total ? running.done / running.total : undefined} max={1} />
-          {JOB_LABEL[running.kind]} {running.name}
-          {running.total > 0 && `: ${running.stage.toLowerCase()} ${running.done.toLocaleString()} of ${running.total.toLocaleString()}`}
+          {jobTitle(running)}: {jobProgress(running)}
           {waiting > 0 && ` (+${waiting} waiting)`}
         </span>
       ) : (

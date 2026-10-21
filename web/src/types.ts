@@ -56,6 +56,8 @@ export interface Job {
   total: number;
   result: string;
   warning: string;
+  resumed: boolean;      // Left unfinished by an earlier run of the app and picked up at start-up
+  restarted: boolean;    // A resumed add stopped during reading: its pages are read again from the first
 }
 
 export interface Overview {

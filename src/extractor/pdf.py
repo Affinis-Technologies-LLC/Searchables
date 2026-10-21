@@ -22,7 +22,10 @@ _LINE_END_HYPHEN = re.compile(r"(?<=[a-z])-\n(?=[a-z])")
 _DISTRIBUTION = re.compile(r"DISTRIBUTION\s+STATEMENT\s+[A-FX]\b.*", re.IGNORECASE | re.DOTALL)
 _DISTRIBUTION_CHARS = 400
 
-ProgressCallback = Callable[[int, int], None]
+# Indexing progress: (stage, done, total). Every stage reports, so a long document never looks stuck (ADR-033)
+ProgressCallback = Callable[[str, int, int], None]
+READING, CLAUSES = "Reading pages", "Finding clauses and tables"
+XREFS, IDENTIFIERS = "Finding cross-references", "Finding identifiers"
 
 
 def ocr_available() -> bool:
@@ -86,18 +89,26 @@ class PDFExtractor:
             running_keys = find_running_text((p.height, p.blocks) for p in pages)
             detector = HeadingDetector(doc.get_toc())
 
-            for page in pages:
+            for i, page in enumerate(pages, 1):
                 self._emit_page(page, running_keys, detector, result)
+                if on_progress and (i % 200 == 0 or i == len(pages)):
+                    on_progress(CLAUSES, i, len(pages))
         result.blocks = inherit_list_provisions(result.blocks)
 
-        for block in result.blocks:
+        for i, block in enumerate(result.blocks, 1):
             # A caption or heading naming itself ("Annex A (informative) …") isn't a reference
             own = block.label if block.is_object else (block.clause_num if block.kind == "heading" else "")
             result.xrefs.extend(
                 CrossRef(block_id=block.id, kind=kind, target=target)
                 for kind, target in find_xrefs(block.text, own)
             )
+            if on_progress and (i % 5000 == 0 or i == len(result.blocks)):
+                on_progress(XREFS, i, len(result.blocks))
+        if on_progress:
+            on_progress(IDENTIFIERS, 0, len(result.blocks))
         result.identifiers = extract_occurrences(result.blocks, result.tables)
+        if on_progress:
+            on_progress(IDENTIFIERS, len(result.blocks), len(result.blocks))
         return result
 
     def _read_pages(
@@ -138,7 +149,7 @@ class PDFExtractor:
                         break
             pages.append(data)
             if on_progress:
-                on_progress(page_no, len(doc))
+                on_progress(READING, page_no, len(doc))
         if not any(p.label for p in pages):   # The PDF names no pages itself: use the numbers printed on them
             printed = find_page_labels((p.number, p.height, p.blocks) for p in pages)
             for p in pages:

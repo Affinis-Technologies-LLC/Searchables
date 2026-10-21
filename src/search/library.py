@@ -18,7 +18,7 @@ from src import config
 from src.extractor.identifiers import (family_of, find_candidates, identifier_key, normalize_text, parent_key,
                                        summarize_families)
 from src.extractor.objects import parse_caption, standard_pattern
-from src.extractor.pdf import PDFExtractor, destination_of
+from src.extractor.pdf import PDFExtractor, READING, destination_of
 from src.extractor.structure import match_outline
 from src.research.assess import assess
 from src.search import semantic
@@ -72,9 +72,9 @@ def _similarities(matrix: np.ndarray, vector: np.ndarray, index: Optional[np.nda
     return out
 
 
-# Indexing progress: (stage, done, total), e.g. ("Reading pages", 12, 80)
+# Indexing progress: (stage, done, total), e.g. ("Reading pages", 12, 80); the extractor's stages come first
 StageCallback = Callable[[str, int, int], None]
-READING, UNDERSTANDING = "Reading pages", "Understanding passages"
+SAVING, UNDERSTANDING = "Saving passages", "Understanding passages"
 
 # Result kinds the sidebar filter offers; headings are grouped with text
 CONTENT_KINDS = {"Text": ("text", "heading"), "Tables": ("table",), "Figures": ("figure",)}
@@ -299,7 +299,7 @@ class Library:
                  len(extracted.ocr_pages), datetime.now().isoformat(timespec="seconds"), config.EXTRACTOR_VERSION,
                  extracted.distribution),
             )
-            self._store_extraction(cur.lastrowid, extracted)
+            self._store_extraction(cur.lastrowid, extracted, on_progress)
         self._embed_if_possible(cur.lastrowid, on_progress)
         return self.document_by_sha(sha256), extracted
 
@@ -326,7 +326,7 @@ class Library:
                 (extracted.page_count, len(extracted.blocks), len(extracted.ocr_pages), config.EXTRACTOR_VERSION,
                  extracted.distribution, doc_id),
             )
-            self._store_extraction(doc_id, extracted)
+            self._store_extraction(doc_id, extracted, on_progress)
         self._embed_if_possible(doc_id, on_progress)
         return extracted
 
@@ -428,9 +428,7 @@ class Library:
     @staticmethod
     def _extract(file_bytes: bytes, filename: str, extractor: PDFExtractor,
                  on_progress: Optional[StageCallback]) -> ExtractedDocument:
-        extracted = extractor.extract(
-            file_bytes, filename, (lambda done, total: on_progress(READING, done, total)) if on_progress else None
-        )
+        extracted = extractor.extract(file_bytes, filename, on_progress)
         if not extracted.blocks:
             raise ValueError(
                 f"No extractable text found in {filename}. "
@@ -438,8 +436,11 @@ class Library:
             )
         return extracted
 
-    def _store_extraction(self, doc_id: int, extracted: ExtractedDocument) -> None:
+    def _store_extraction(self, doc_id: int, extracted: ExtractedDocument,
+                          on_progress: Optional[StageCallback] = None) -> None:
         """Writes blocks, index, tables, cross-references and identifiers. Call inside a transaction."""
+        if on_progress:   # One transaction: minutes for a very large document, so it says so (ADR-033)
+            on_progress(SAVING, 0, len(extracted.blocks))
         first_id = self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM blocks").fetchone()[0]
         # Extracted ids are positions (0, 1, 2…), so the stored id is first_id + local id
         rows = [
@@ -484,6 +485,8 @@ class Library:
             f"AND family NOT IN ({placeholders})",
             [doc_id, *present],
         )
+        if on_progress:
+            on_progress(SAVING, len(extracted.blocks), len(extracted.blocks))
 
     def _delete_index(self, doc_id: int) -> None:
         # FTS5 tables have no foreign keys, so their rows go explicitly; the rest cascade from blocks
@@ -798,6 +801,7 @@ class Library:
         provisions: Optional[Sequence[str]] = None,
         use_meaning: bool = True,
         expanded: str = "",
+        query_vector: Optional[np.ndarray] = None,
     ) -> Tuple[List[SearchResult], int]:
         """
         Returns (results, total_matches). Relevance order uses BM25; document order lists hits
@@ -807,6 +811,8 @@ class Library:
         `use_meaning=False` searches by words alone (for measuring what meaning adds). `expanded` is
         the query with its acronyms spelled out (or the reverse): the meaning search, and the search
         for passages with only some of the words, use it, since the model doesn't know the acronyms.
+        `query_vector` is the query's meaning vector when the caller computed it already (the server
+        does, outside its lock, when wants_query_vector says it's needed; ADR-033).
         Raises ValueError when the query has nothing searchable.
         """
         fts_query = build_fts_query(query_text)
@@ -820,7 +826,8 @@ class Library:
             params,
         ).fetchone()[0]
 
-        meaning = self._meaning_matches(expanded or query_text, doc_ids, kinds, provisions) if plain and use_meaning else []
+        meaning = (self._meaning_matches(expanded or query_text, doc_ids, kinds, provisions, query_vector)
+                   if plain and use_meaning else [])
         # Keyword rows in relevance order; deeper when they'll be merged with meaning matches
         depth = max(limit, config.FUSION_DEPTH) if meaning else limit
         keyword_rows = self._keyword_rows(where, params, "d.title COLLATE NOCASE, b.seq" if document_order and not meaning
@@ -891,20 +898,27 @@ class Library:
         return where, params
 
     def _keyword_rows(self, where: str, params: list, order: str, limit: int) -> List[sqlite3.Row]:
+        # Ranked first, then highlighted: highlight() and snippet() on every matching row cost more
+        # than the ranking on a very large document (ADR-033). params[0] is the FTS query.
         return self.conn.execute(
             f"""
-            SELECT b.*, d.title AS doc_title,
-                   bm25(blocks_fts) * (CASE WHEN b.kind = 'heading' THEN ? ELSE 1.0 END) AS score,
+            SELECT b.*, d.title AS doc_title, f.score AS score,
                    highlight(blocks_fts, 0, ?, ?) AS marked,
                    snippet(blocks_fts, 0, ?, ?, '…', {_SNIPPET_TOKENS}) AS snippet
-            FROM blocks_fts
-            JOIN blocks b ON b.id = blocks_fts.rowid
+            FROM (SELECT blocks_fts.rowid AS id,
+                         bm25(blocks_fts) * (CASE WHEN b.kind = 'heading' THEN ? ELSE 1.0 END) AS score
+                  FROM blocks_fts
+                  JOIN blocks b ON b.id = blocks_fts.rowid
+                  JOIN documents d ON d.id = b.doc_id
+                  WHERE {where}
+                  ORDER BY {order}
+                  LIMIT ?) f
+            JOIN blocks_fts ON blocks_fts.rowid = f.id AND blocks_fts MATCH ?
+            JOIN blocks b ON b.id = f.id
             JOIN documents d ON d.id = b.doc_id
-            WHERE {where}
             ORDER BY {order}
-            LIMIT ?
             """,
-            [config.HEADING_SCORE_WEIGHT, _HIT_START, _HIT_END, _HIT_START, _HIT_END, *params, limit],
+            [_HIT_START, _HIT_END, _HIT_START, _HIT_END, config.HEADING_SCORE_WEIGHT, *params, limit, params[0]],
         ).fetchall()
 
     @staticmethod
@@ -969,9 +983,16 @@ class Library:
             self._meaning_cache.clear()
         return self._vector_cache[1]
 
+    def wants_query_vector(self, query_text: str, doc_ids: Optional[Sequence[int]] = None,
+                           kinds: Optional[Sequence[str]] = None, provisions: Optional[Sequence[str]] = None) -> bool:
+        """Whether a search for this would read the model: vectors to search, the model present, no answer kept."""
+        if self._vectors() is None or not semantic.model_files_present():
+            return False
+        return (query_text, tuple(doc_ids or ()), tuple(kinds or ()), tuple(provisions or ())) not in self._meaning_cache
+
     def _meaning_matches(self, query_text: str, doc_ids: Optional[Sequence[int]] = None,
-                         kinds: Optional[Sequence[str]] = None,
-                         provisions: Optional[Sequence[str]] = None) -> List[Tuple[int, float, Tuple[int, int]]]:
+                         kinds: Optional[Sequence[str]] = None, provisions: Optional[Sequence[str]] = None,
+                         vector: Optional[np.ndarray] = None) -> List[Tuple[int, float, Tuple[int, int]]]:
         """
         (block id, similarity, table rows) for the passages closest in meaning to the query, best
         first. Only clearly relevant ones: above an absolute floor, and near the best match's
@@ -997,7 +1018,8 @@ class Library:
         found: List[Tuple[int, float, Tuple[int, int]]] = []
         if mask.any():
             candidates = np.flatnonzero(mask)
-            similarities = _similarities(vectors.matrix, semantic.embed_query(query_text), candidates)
+            query = vector if vector is not None else semantic.embed_query(query_text)
+            similarities = _similarities(vectors.matrix, query, candidates)
             floor = max(config.MEANING_MIN_SIMILARITY, float(similarities.max()) - config.MEANING_BAND)
             seen = set()
             for i in np.argsort(-similarities):

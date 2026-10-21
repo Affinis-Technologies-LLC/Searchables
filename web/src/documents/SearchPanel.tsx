@@ -5,6 +5,7 @@ import { Highlight, useApp } from "../store";
 import { Block, IdentifierResults, SearchResult } from "../types";
 import { Badge, Chips, Empty, Marked, saveText, Segments, Status, Table, tableToCsv } from "../ui";
 import { ResultCard } from "./ResultCard";
+import { indexingNotice } from "../shell/jobs";
 
 interface Submitted { text: string; identifier: boolean; children: boolean }
 
@@ -94,6 +95,7 @@ export function SearchPanel() {
   };
 
   const filtered = docs.length + content.length + provisions.length > 0;
+  const indexing = indexingNotice(overview.jobs.active);   // Searches wait for the model's batch meanwhile (ADR-033)
   return (
     <div className="panel">
       <form className="panel-head" onSubmit={submit}>
@@ -150,6 +152,7 @@ export function SearchPanel() {
             <input type="number" min={5} max={100} step={5} value={limit} onChange={(e) => setLimit(Number(e.target.value) || 25)} /></div>
         </details>
       </form>
+      {indexing && <div className="notice">{indexing}</div>}
 
       <div className="panel-body">
         {!submitted && (

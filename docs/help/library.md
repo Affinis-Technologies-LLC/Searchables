@@ -6,7 +6,15 @@ Where documents are added and kept indexed.
 
 Drop a PDF or choose it. It's read in the background: text, headings, tables, identifiers,
 provisions, acronyms and the distribution statement. Scanned pages are read with OCR when it's
-installed. The bottom bar shows progress; the document can be searched as soon as it's done.
+installed. The bottom bar shows each stage with its count (reading pages, finding clauses and
+tables, cross-references and identifiers, saving passages, then understanding passages for meaning
+search); the document can be searched by words as soon as its passages are saved.
+
+A very large document takes hours to understand, and searches answer more slowly meanwhile: each
+waits a moment for the language model between the indexer's steps (the Search view says so while
+it lasts). If the app is stopped during indexing, the job is picked up when it starts again and
+shown as **Resuming after a restart**; a document stopped while its pages were being read is read
+again from the first page, and one stopped during understanding carries on from where it was.
 
 ## Meaning search
 
