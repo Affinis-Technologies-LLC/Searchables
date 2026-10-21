@@ -60,6 +60,10 @@ class _Vectors:
 
 
 _SLAB = 16384  # Vectors converted to float32 at a time
+_BUSY_TIMEOUT_MS = 15000  # How long a write waits for the indexer's transaction before "database is locked"
+# Every full-text query joins the index to blocks with CROSS JOIN: SQLite then reads the index first.
+# A plain JOIN lets the planner start from a document filter and run the match once per passage,
+# minutes on a very large document (ADR-034); a test checks the plan of every such statement.
 
 
 def _similarities(matrix: np.ndarray, vector: np.ndarray, index: Optional[np.ndarray] = None) -> np.ndarray:
@@ -217,7 +221,7 @@ class Library:
         self.conn.execute("PRAGMA foreign_keys = ON")
         # WAL: readers aren't blocked by the background indexer's writes, and it survives crashes better
         self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA busy_timeout = 15000")
+        self.conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         self._vector_cache: Optional[tuple] = None   # (vectors version, _Vectors or None)
         self._meaning_cache: dict = {}               # Searches by meaning already answered, until the vectors change
         self._migrate()
@@ -822,7 +826,7 @@ class Library:
         plain = uses_meaning(query_text)
         where, params = self._match_scope(fts_query, doc_ids, kinds, provisions)
         total = self.conn.execute(
-            f"SELECT COUNT(*) FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid WHERE {where}",
+            f"SELECT COUNT(*) FROM blocks_fts CROSS JOIN blocks b ON b.id = blocks_fts.rowid WHERE {where}",
             params,
         ).fetchone()[0]
 
@@ -908,8 +912,8 @@ class Library:
             FROM (SELECT blocks_fts.rowid AS id,
                          bm25(blocks_fts) * (CASE WHEN b.kind = 'heading' THEN ? ELSE 1.0 END) AS score
                   FROM blocks_fts
-                  JOIN blocks b ON b.id = blocks_fts.rowid
-                  JOIN documents d ON d.id = b.doc_id
+                  CROSS JOIN blocks b ON b.id = blocks_fts.rowid
+                  CROSS JOIN documents d ON d.id = b.doc_id
                   WHERE {where}
                   ORDER BY {order}
                   LIMIT ?) f
@@ -1041,7 +1045,7 @@ class Library:
         if not fts_query:
             return []
         rows = self.conn.execute(
-            "SELECT DISTINCT b.page FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+            "SELECT DISTINCT b.page FROM blocks_fts CROSS JOIN blocks b ON b.id = blocks_fts.rowid "
             "WHERE blocks_fts MATCH ? AND b.doc_id = ? ORDER BY b.page",
             (fts_query, doc_id),
         ).fetchall()
@@ -1068,7 +1072,7 @@ class Library:
         fts_query = build_fts_query(query_text)
         if not fts_query:
             return []
-        sql = ("SELECT b.id, highlight(blocks_fts, 0, ?, ?) FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+        sql = ("SELECT b.id, highlight(blocks_fts, 0, ?, ?) FROM blocks_fts CROSS JOIN blocks b ON b.id = blocks_fts.rowid "
                "WHERE blocks_fts MATCH ? AND b.doc_id = ? AND b.page = ?")
         rows = self.conn.execute(sql, (_HIT_START, _HIT_END, fts_query, doc_id, page)).fetchall()
         if not rows and uses_meaning(query_text):
@@ -1091,12 +1095,22 @@ class Library:
     # ---- Search history --------------------------------------------------------------------
 
     def record_search(self, query_text: str) -> None:
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO search_history (query, searched_at) VALUES (?, ?) "
-                "ON CONFLICT(query) DO UPDATE SET searched_at = excluded.searched_at",
-                (query_text.strip(), datetime.now().isoformat(timespec="seconds")),
-            )
+        """
+        Best-effort: while the indexer saves a large document the library is locked to writers for
+        minutes, and a search must not wait on its own history, so this tries briefly and gives up (ADR-034).
+        """
+        self.conn.execute("PRAGMA busy_timeout = 250")
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO search_history (query, searched_at) VALUES (?, ?) "
+                    "ON CONFLICT(query) DO UPDATE SET searched_at = excluded.searched_at",
+                    (query_text.strip(), datetime.now().isoformat(timespec="seconds")),
+                )
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            self.conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
 
     def recent_searches(self, limit: int = config.RECENT_SEARCHES) -> List[str]:
         rows = self.conn.execute(
@@ -1626,7 +1640,7 @@ class Library:
             if not fts_query:
                 continue
             for other in self.conn.execute(
-                "SELECT b.id FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+                "SELECT b.id FROM blocks_fts CROSS JOIN blocks b ON b.id = blocks_fts.rowid "
                 "WHERE blocks_fts MATCH ? AND b.doc_id = ? AND b.id != ? ORDER BY bm25(blocks_fts) LIMIT 50",
                 (fts_query, block.doc_id, block.id),
             ):
@@ -1647,7 +1661,7 @@ class Library:
             return []
         links = []
         for row in self.conn.execute(
-            "SELECT b.id, highlight(blocks_fts, 0, ?, ?) AS marked FROM blocks_fts JOIN blocks b ON b.id = blocks_fts.rowid "
+            "SELECT b.id, highlight(blocks_fts, 0, ?, ?) AS marked FROM blocks_fts CROSS JOIN blocks b ON b.id = blocks_fts.rowid "
             "WHERE blocks_fts MATCH ? AND b.id != ? AND b.kind != 'heading' ORDER BY bm25(blocks_fts) LIMIT 40",
             (_HIT_START, _HIT_END, fts_query, block.id),
         ):

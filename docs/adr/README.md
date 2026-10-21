@@ -40,5 +40,6 @@ to them or supersedes them knowingly.
 | [ADR-031](adr-031-fixing-dead-links.md) | Fixing a PDF's dead links: a Links view that checks every internal link and bookmark at the raw object level, re-points the dead and mis-pointed ones by the document's own structure, and downloads the fixed file; refuses signed, locked and encrypted files (roadmap step 21, built) |
 | [ADR-032](adr-032-bookmarks.md) | Bookmarks audited like links (wrong page, retitled, unchecked), the outline rebuilt from the headings on request, and a Bookmarks row in the Library's health report; amends ADR-031 (roadmap step 22, built) |
 | [ADR-033](adr-033-searching-while-indexing.md) | Searching while a large document is indexed: a shorter model batch, the model wait outside the API lock, the model limited to half the threads, every indexing stage and a resumed job reported, keyword results ranked before highlighting; amends ADR-004 and ADR-007 (roadmap step 23, built) |
+| [ADR-034](adr-034-full-text-queries-at-scale.md) | Full-text queries on a very large document: the index read first (`CROSS JOIN`, plan-guarded by a test), a search's history write never waiting on the indexer; amends ADR-004 (roadmap step 24, built) |
 
 The order of work, and which record each step needs, is in [../roadmap.md](../roadmap.md).

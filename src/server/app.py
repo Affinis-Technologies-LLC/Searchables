@@ -215,11 +215,18 @@ def api(method: str, path: str, public: bool = False, locked: bool = True) -> Ca
                 return JSONResponse({"error": str(e), "path": e.path, "current_text": e.current_text,
                                      "current_sha256": e.current_sha256}, status_code=409)
             except (ValueError, sqlite3.OperationalError, OSError) as e:
-                return JSONResponse({"error": str(e)}, status_code=400)
+                return JSONResponse({"error": _error_message(e)}, status_code=400)
             return result if isinstance(result, Response) else JSONResponse(plain(result))
         _routes.append(Route("/api" + path, endpoint, methods=[method]))
         return handler
     return register
+
+
+def _error_message(e: Exception) -> str:
+    """What the user is told: SQLite's "database is locked" means the indexer is saving a large document (ADR-034)."""
+    if isinstance(e, sqlite3.OperationalError) and "locked" in str(e):
+        return "The library is being written to by the indexer (saving a large document); try again in a moment."
+    return str(e)
 
 
 def _download(content: Any, filename: str, media_type: str) -> Response:
